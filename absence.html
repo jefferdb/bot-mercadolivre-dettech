@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bot Mercado Livre - Configurações de Ausência</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #f8f9fa; }
+        .container { max-width: 1200px; margin: 0 auto; padding: 20px; }
+        .header { background: linear-gradient(135deg, #3483fa, #2968c8); color: white; padding: 30px; border-radius: 12px; margin-bottom: 30px; box-shadow: 0 4px 20px rgba(52, 131, 250, 0.3); }
+        .header h1 { font-size: 2.5em; margin-bottom: 10px; }
+        .nav { display: flex; gap: 15px; margin-top: 25px; flex-wrap: wrap; }
+        .nav a { padding: 12px 24px; background: rgba(255,255,255,0.2); color: white; text-decoration: none; border-radius: 8px; transition: all 0.3s; }
+        .nav a:hover { background: rgba(255,255,255,0.3); transform: translateY(-2px); }
+        .absence-container { background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.08); }
+        .absence-header { margin-bottom: 30px; }
+        .absence-header h2 { color: #333; font-size: 1.8em; margin-bottom: 10px; }
+        .absence-header p { color: #666; line-height: 1.6; }
+        .config-item { border: 2px solid #e9ecef; border-radius: 12px; padding: 25px; margin-bottom: 20px; transition: all 0.3s; position: relative; }
+        .config-item:hover { border-color: #3483fa; transform: translateY(-2px); box-shadow: 0 8px 25px rgba(52, 131, 250, 0.15); }
+        .config-status { position: absolute; top: 15px; right: 15px; padding: 6px 12px; border-radius: 15px; font-size: 12px; font-weight: bold; }
+        .config-status.active { background: #d4edda; color: #155724; }
+        .config-status.inactive { background: #f8d7da; color: #721c24; }
+        .config-name { font-weight: bold; color: #3483fa; margin-bottom: 15px; font-size: 1.2em; }
+        .config-name::before { content: "🌙 "; }
+        .config-details { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin-bottom: 15px; }
+        .config-detail { background: #f8f9fa; padding: 12px; border-radius: 8px; }
+        .config-detail strong { color: #333; display: block; margin-bottom: 5px; }
+        .config-message { background: #fff3cd; padding: 15px; border-radius: 8px; border-left: 4px solid #ffc107; margin-top: 15px; }
+        .config-message::before { content: "💬 "; font-weight: bold; }
+        .days-list { display: flex; gap: 8px; flex-wrap: wrap; }
+        .day-badge { background: #3483fa; color: white; padding: 4px 8px; border-radius: 12px; font-size: 0.8em; }
+        .no-configs { text-align: center; padding: 60px 20px; color: #666; }
+        .no-configs h3 { margin-bottom: 15px; color: #999; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🤖 Bot do Mercado Livre</h1>
+            <div class="nav">
+                <a href="/">📊 Dashboard</a>
+                <a href="/rules">📋 Regras</a>
+                <a href="/questions">❓ Perguntas</a>
+                <a href="/absence">🌙 Ausência</a>
+            </div>
+        </div>
+
+        <div class="absence-container">
+            <div class="absence-header">
+                <h2>🌙 Configurações de Ausência</h2>
+                <p>Configure mensagens automáticas para horários específicos ou dias da semana quando você não estiver disponível para atendimento.</p>
+            </div>
+            
+            {% if configs %}
+                {% for config in configs %}
+                <div class="config-item">
+                    <div class="config-status {% if config.is_active %}active{% else %}inactive{% endif %}">
+                        {% if config.is_active %}✅ Ativo{% else %}❌ Inativo{% endif %}
+                    </div>
+                    
+                    <div class="config-name">{{ config.name }}</div>
+                    
+                    <div class="config-details">
+                        {% if config.start_time and config.end_time %}
+                        <div class="config-detail">
+                            <strong>⏰ Horário:</strong>
+                            {{ config.start_time }} às {{ config.end_time }}
+                        </div>
+                        {% endif %}
+                        
+                        {% if config.days_of_week %}
+                        <div class="config-detail">
+                            <strong>📅 Dias da Semana:</strong>
+                            <div class="days-list">
+                                {% for day in config.days_of_week.split(',') %}
+                                    {% if day == '0' %}<span class="day-badge">Segunda</span>
+                                    {% elif day == '1' %}<span class="day-badge">Terça</span>
+                                    {% elif day == '2' %}<span class="day-badge">Quarta</span>
+                                    {% elif day == '3' %}<span class="day-badge">Quinta</span>
+                                    {% elif day == '4' %}<span class="day-badge">Sexta</span>
+                                    {% elif day == '5' %}<span class="day-badge">Sábado</span>
+                                    {% elif day == '6' %}<span class="day-badge">Domingo</span>
+                                    {% endif %}
+                                {% endfor %}
+                            </div>
+                        </div>
+                        {% endif %}
+                    </div>
+                    
+                    <div class="config-message">{{ config.message }}</div>
+                </div>
+                {% endfor %}
+            {% else %}
+                <div class="no-configs">
+                    <h3>🌙 Nenhuma configuração de ausência encontrada</h3>
+                    <p>Configure mensagens automáticas para quando você estiver ausente.</p>
+                </div>
+            {% endif %}
+        </div>
+    </div>
+</body>
+</html>
+
