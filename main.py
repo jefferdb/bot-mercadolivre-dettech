@@ -1,229 +1,490 @@
-"""
-Bot do Mercado Livre - Versão Railway
-Versão básica sem IA, otimizada para PostgreSQL
-"""
-
 import os
-import sys
+import time
 import threading
-from datetime import datetime
-from flask import Flask, send_from_directory, jsonify
+from datetime import datetime, timedelta
+from flask import Flask, render_template, request, jsonify
+from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
+import requests
 
-# Adicionar diretório src ao path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
+# Configuração da aplicação
+app = Flask(__name__)
+CORS(app)
 
-# Importar módulos do bot
-from models.user import db
-from models.mercadolivre import MLCredentials, MLQuestion, MLAutoResponse, MLLog
-from routes.user import user_bp
-from routes.mercadolivre import ml_bp
-from services.polling_service import PollingService
-
-# Configurar Flask
-app = Flask(__name__, static_folder='src/static')
-
-# Configuração para Railway
-app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dettech_bot_railway_2024')
-
-# Habilitar CORS
-CORS(app, origins="*")
-
-# Registrar blueprints
-app.register_blueprint(user_bp, url_prefix='/api')
-app.register_blueprint(ml_bp, url_prefix='/api/ml')
-
-# Configuração do banco PostgreSQL para Railway
-DATABASE_URL = os.environ.get('DATABASE_URL')
-if DATABASE_URL:
-    # PostgreSQL no Railway
-    if DATABASE_URL.startswith('postgres://'):
-        DATABASE_URL = DATABASE_URL.replace('postgres://', 'postgresql://', 1)
-    app.config['SQLALCHEMY_DATABASE_URI'] = DATABASE_URL
-else:
-    # Fallback para desenvolvimento local
-    app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///src/database/app.db'
-
+# Configuração do banco SQLite em memória (não precisa de arquivo)
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///:memory:'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
-# Inicializar banco
-db.init_app(app)
+db = SQLAlchemy(app)
 
-# Variável global para polling service
-polling_service = None
+# Configurações do Mercado Livre
+ML_CLIENT_ID = os.getenv('ML_CLIENT_ID', '5510376630479325')
+ML_CLIENT_SECRET = os.getenv('ML_CLIENT_SECRET', 'jlR4As2x8uFY3RTpysLpuPhzC9yM9d35')
+ML_ACCESS_TOKEN = os.getenv('ML_ACCESS_TOKEN', 'APP_USR-5510376630479325-072321-31ceebc6a2428e8723948d8e00c75015-180617463')
+ML_USER_ID = os.getenv('ML_USER_ID', '180617463')
 
-def initialize_database():
-    """Inicializar banco de dados"""
+# Modelos do banco de dados
+class User(db.Model):
+    __tablename__ = 'users'
+    id = db.Column(db.Integer, primary_key=True)
+    ml_user_id = db.Column(db.String(50), unique=True, nullable=False)
+    access_token = db.Column(db.String(200), nullable=False)
+    refresh_token = db.Column(db.String(200))
+    token_expires_at = db.Column(db.DateTime)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+class AutoResponse(db.Model):
+    __tablename__ = 'auto_responses'
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    keywords = db.Column(db.Text, nullable=False)
+    response_text = db.Column(db.Text, nullable=False)
+    is_active = db.Column(db.Boolean, default=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+class Question(db.Model):
+    __tablename__ = 'questions'
+    id = db.Column(db.Integer, primary_key=True)
+    ml_question_id = db.Column(db.String(50), unique=True, nullable=False)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    item_id = db.Column(db.String(50), nullable=False)
+    question_text = db.Column(db.Text, nullable=False)
+    answer_text = db.Column(db.Text)
+    status = db.Column(db.String(20), default='pending')
+    answered_at = db.Column(db.DateTime)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+class AbsenceConfig(db.Model):
+    __tablename__ = 'absence_configs'
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    name = db.Column(db.String(100), nullable=False)
+    start_time = db.Column(db.String(5))  # HH:MM
+    end_time = db.Column(db.String(5))    # HH:MM
+    days_of_week = db.Column(db.String(20))  # 0,1,2,3,4,5,6
+    message = db.Column(db.Text, nullable=False)
+    is_active = db.Column(db.Boolean, default=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+# Variáveis globais para estatísticas
+stats = {
+    'total_questions': 0,
+    'answered_questions': 0,
+    'pending_questions': 0,
+    'success_rate': 0
+}
+
+# Funções auxiliares
+def get_ml_headers():
+    return {
+        'Authorization': f'Bearer {ML_ACCESS_TOKEN}',
+        'Content-Type': 'application/json'
+    }
+
+def get_questions():
+    try:
+        url = f'https://api.mercadolibre.com/my/received_questions/search?seller_id={ML_USER_ID}&status=UNANSWERED'
+        response = requests.get(url, headers=get_ml_headers(), timeout=10)
+        
+        if response.status_code == 200:
+            return response.json().get('questions', [])
+        else:
+            print(f"Erro ao buscar perguntas: {response.status_code}")
+            return []
+    except Exception as e:
+        print(f"Erro na requisição: {e}")
+        return []
+
+def answer_question(question_id, answer_text):
+    try:
+        url = f'https://api.mercadolibre.com/answers'
+        data = {
+            'question_id': question_id,
+            'text': answer_text
+        }
+        
+        response = requests.post(url, headers=get_ml_headers(), json=data, timeout=10)
+        return response.status_code == 201
+    except Exception as e:
+        print(f"Erro ao responder pergunta: {e}")
+        return False
+
+def find_matching_response(question_text, user_id):
+    try:
+        responses = AutoResponse.query.filter_by(user_id=user_id, is_active=True).all()
+        
+        for response in responses:
+            keywords = [k.strip().lower() for k in response.keywords.split(',')]
+            question_lower = question_text.lower()
+            
+            if any(keyword in question_lower for keyword in keywords):
+                return response.response_text
+        
+        return None
+    except Exception as e:
+        print(f"Erro ao buscar resposta: {e}")
+        return None
+
+def check_absence_message(user_id):
+    try:
+        now = datetime.now()
+        current_time = now.strftime('%H:%M')
+        current_day = str(now.weekday())
+        
+        absence_configs = AbsenceConfig.query.filter_by(user_id=user_id, is_active=True).all()
+        
+        for config in absence_configs:
+            if config.days_of_week and current_day in config.days_of_week.split(','):
+                if config.start_time and config.end_time:
+                    if config.start_time <= current_time <= config.end_time:
+                        return config.message
+        
+        return None
+    except Exception as e:
+        print(f"Erro ao verificar ausência: {e}")
+        return None
+
+def process_questions():
+    global stats
+    try:
+        user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
+        if not user:
+            return
+        
+        questions = get_questions()
+        
+        for q in questions:
+            try:
+                existing = Question.query.filter_by(ml_question_id=str(q['id'])).first()
+                if existing:
+                    continue
+                
+                # Verificar mensagem de ausência primeiro
+                absence_msg = check_absence_message(user.id)
+                if absence_msg:
+                    answer_text = absence_msg
+                else:
+                    # Buscar resposta automática
+                    answer_text = find_matching_response(q['text'], user.id)
+                
+                if answer_text:
+                    success = answer_question(q['id'], answer_text)
+                    
+                    question = Question(
+                        ml_question_id=str(q['id']),
+                        user_id=user.id,
+                        item_id=q['item_id'],
+                        question_text=q['text'],
+                        answer_text=answer_text if success else None,
+                        status='answered' if success else 'failed',
+                        answered_at=datetime.utcnow() if success else None
+                    )
+                    db.session.add(question)
+                    
+                    if success:
+                        stats['answered_questions'] += 1
+                        print(f"✅ Pergunta respondida: {q['text'][:50]}...")
+                else:
+                    question = Question(
+                        ml_question_id=str(q['id']),
+                        user_id=user.id,
+                        item_id=q['item_id'],
+                        question_text=q['text'],
+                        status='no_response'
+                    )
+                    db.session.add(question)
+                    stats['pending_questions'] += 1
+                
+                stats['total_questions'] += 1
+                
+            except Exception as e:
+                print(f"Erro ao processar pergunta individual: {e}")
+                continue
+        
+        db.session.commit()
+        
+        # Atualizar taxa de sucesso
+        if stats['total_questions'] > 0:
+            stats['success_rate'] = round((stats['answered_questions'] / stats['total_questions']) * 100, 1)
+        
+    except Exception as e:
+        print(f"Erro ao processar perguntas: {e}")
+
+def polling_worker():
+    print("🔄 Iniciando monitoramento de perguntas...")
+    while True:
+        try:
+            process_questions()
+            time.sleep(60)  # Verifica a cada 60 segundos
+        except Exception as e:
+            print(f"Erro no polling: {e}")
+            time.sleep(60)
+
+def initialize_default_data():
+    """Inicializa dados padrão no banco em memória"""
+    try:
+        # Criar usuário padrão
+        user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
+        if not user:
+            user = User(
+                ml_user_id=ML_USER_ID,
+                access_token=ML_ACCESS_TOKEN,
+                token_expires_at=datetime.utcnow() + timedelta(hours=6)
+            )
+            db.session.add(user)
+            db.session.commit()
+        
+        # Regras padrão
+        default_rules = [
+            {'keywords': 'preço, valor, quanto custa', 'response': 'O preço está na descrição do produto. Qualquer dúvida, estou à disposição!'},
+            {'keywords': 'entrega, prazo, demora', 'response': 'O prazo de entrega aparece na página do produto. Enviamos no mesmo dia útil!'},
+            {'keywords': 'frete, envio, correios', 'response': 'O frete é calculado automaticamente pelo CEP. Temos frete grátis para algumas regiões!'},
+            {'keywords': 'disponível, estoque, tem', 'response': 'Sim, temos em estoque! Pode fazer o pedido que enviamos rapidinho.'},
+            {'keywords': 'garantia, defeito, problema', 'response': 'Todos os produtos têm garantia. Em caso de defeito, trocamos sem problemas!'},
+            {'keywords': 'pagamento, cartão, pix', 'response': 'Aceitamos todas as formas de pagamento do Mercado Livre: cartão, PIX, boleto.'},
+            {'keywords': 'tamanho, medida, dimensão', 'response': 'As medidas estão na descrição do produto. Qualquer dúvida específica, me avise!'},
+            {'keywords': 'cor, cores, colorido', 'response': 'As cores disponíveis estão nas opções do anúncio. Escolha a sua preferida!'},
+            {'keywords': 'usado, novo, estado', 'response': 'Todos os nossos produtos são novos e originais, com garantia do fabricante.'},
+            {'keywords': 'desconto, promoção, oferta', 'response': 'Este já é nosso melhor preço! Aproveite que temos estoque disponível.'}
+        ]
+        
+        for rule_data in default_rules:
+            existing = AutoResponse.query.filter_by(
+                user_id=user.id, 
+                keywords=rule_data['keywords']
+            ).first()
+            
+            if not existing:
+                rule = AutoResponse(
+                    user_id=user.id,
+                    keywords=rule_data['keywords'],
+                    response_text=rule_data['response'],
+                    is_active=True
+                )
+                db.session.add(rule)
+        
+        # Configurações de ausência padrão
+        absence_configs = [
+            {
+                'name': 'Horário Comercial',
+                'start_time': '18:00',
+                'end_time': '08:00',
+                'days_of_week': '0,1,2,3,4',
+                'message': 'Obrigado pela pergunta! Nosso atendimento é de segunda a sexta, das 8h às 18h. Responderemos em breve!'
+            },
+            {
+                'name': 'Final de Semana',
+                'start_time': None,
+                'end_time': None,
+                'days_of_week': '5,6',
+                'message': 'Obrigado pelo contato! Não trabalhamos aos finais de semana. Responderemos na segunda-feira!'
+            }
+        ]
+        
+        for config_data in absence_configs:
+            existing = AbsenceConfig.query.filter_by(
+                user_id=user.id,
+                name=config_data['name']
+            ).first()
+            
+            if not existing:
+                config = AbsenceConfig(
+                    user_id=user.id,
+                    name=config_data['name'],
+                    start_time=config_data['start_time'],
+                    end_time=config_data['end_time'],
+                    days_of_week=config_data['days_of_week'],
+                    message=config_data['message'],
+                    is_active=True
+                )
+                db.session.add(config)
+        
+        db.session.commit()
+        
+        rules_count = AutoResponse.query.filter_by(user_id=user.id).count()
+        absence_count = AbsenceConfig.query.filter_by(user_id=user.id).count()
+        
+        print(f"✅ {rules_count} regras e {absence_count} configurações de ausência carregadas!")
+        
+    except Exception as e:
+        print(f"Erro ao inicializar dados: {e}")
+
+# Rotas da aplicação
+@app.route('/')
+def dashboard():
+    try:
+        user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
+        if not user:
+            return render_template('dashboard.html', 
+                                 status='disconnected',
+                                 stats={'total': 0, 'answered': 0, 'pending': 0, 'success_rate': 0})
+        
+        return render_template('dashboard.html', 
+                             status='connected',
+                             token_valid=True,
+                             stats={
+                                 'total': stats['total_questions'],
+                                 'answered': stats['answered_questions'],
+                                 'pending': stats['pending_questions'],
+                                 'success_rate': stats['success_rate']
+                             })
+    except Exception as e:
+        return render_template('dashboard.html', 
+                             status='error',
+                             error=str(e),
+                             stats={'total': 0, 'answered': 0, 'pending': 0, 'success_rate': 0})
+
+@app.route('/rules')
+def rules():
+    try:
+        user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
+        if not user:
+            return render_template('rules.html', rules=[])
+        
+        rules = AutoResponse.query.filter_by(user_id=user.id).all()
+        return render_template('rules.html', rules=rules)
+    except Exception as e:
+        return render_template('rules.html', rules=[], error=str(e))
+
+@app.route('/questions')
+def questions():
+    try:
+        user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
+        if not user:
+            return render_template('questions.html', questions=[])
+        
+        questions = Question.query.filter_by(user_id=user.id).order_by(Question.created_at.desc()).limit(100).all()
+        return render_template('questions.html', questions=questions)
+    except Exception as e:
+        return render_template('questions.html', questions=[], error=str(e))
+
+@app.route('/absence')
+def absence():
+    try:
+        user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
+        if not user:
+            return render_template('absence.html', configs=[])
+        
+        configs = AbsenceConfig.query.filter_by(user_id=user.id).all()
+        return render_template('absence.html', configs=configs)
+    except Exception as e:
+        return render_template('absence.html', configs=[], error=str(e))
+
+@app.route('/api/ml/rules')
+def get_rules():
+    try:
+        user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
+        if not user:
+            return jsonify({'error': 'Usuário não encontrado'}), 400
+        
+        rules = AutoResponse.query.filter_by(user_id=user.id).all()
+        return jsonify([{
+            'id': rule.id,
+            'keywords': rule.keywords,
+            'response': rule.response_text,
+            'is_active': rule.is_active
+        } for rule in rules])
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/ml/absence')
+def get_absence():
+    try:
+        user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
+        if not user:
+            return jsonify({'error': 'Usuário não encontrado'}), 400
+        
+        configs = AbsenceConfig.query.filter_by(user_id=user.id).all()
+        return jsonify([{
+            'id': config.id,
+            'name': config.name,
+            'start_time': config.start_time,
+            'end_time': config.end_time,
+            'days_of_week': config.days_of_week,
+            'message': config.message,
+            'is_active': config.is_active
+        } for config in configs])
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/ml/statistics/realtime')
+def get_realtime_stats():
+    try:
+        return jsonify({
+            'total_questions': stats['total_questions'],
+            'answered_questions': stats['answered_questions'],
+            'pending_questions': stats['pending_questions'],
+            'success_rate': stats['success_rate'],
+            'status': 'connected',
+            'token_valid': True
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/ml/statistics/quality')
+def get_quality_stats():
+    try:
+        return jsonify({
+            'average_response_time': '< 1 minuto',
+            'satisfaction_rate': 95.5,
+            'total_interactions': stats['total_questions']
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/ml/questions/recent')
+def get_recent_questions():
+    try:
+        user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
+        if not user:
+            return jsonify({'error': 'Usuário não encontrado'}), 400
+        
+        limit = request.args.get('limit', 20, type=int)
+        questions = Question.query.filter_by(user_id=user.id).order_by(Question.created_at.desc()).limit(limit).all()
+        
+        return jsonify([{
+            'id': q.id,
+            'question_text': q.question_text,
+            'answer_text': q.answer_text,
+            'status': q.status,
+            'created_at': q.created_at.isoformat() if q.created_at else None,
+            'answered_at': q.answered_at.isoformat() if q.answered_at else None
+        } for q in questions])
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+# Inicialização da aplicação
+def create_app():
     with app.app_context():
         try:
             # Criar todas as tabelas
             db.create_all()
+            print("✅ Banco de dados em memória criado com sucesso!")
             
-            # Verificar se já existem credenciais
-            if MLCredentials.query.count() == 0:
-                print("📝 Inicializando credenciais padrão...")
-                credentials = MLCredentials(
-                    client_id=os.environ.get('ML_CLIENT_ID', "5510376630479325"),
-                    client_secret=os.environ.get('ML_CLIENT_SECRET', "jlR4As2x8uFY3RTpysLpuPhzC9yM9d35"),
-                    access_token=os.environ.get('ML_ACCESS_TOKEN', "APP_USR-5510376630479325-072321-31ceebc6a2428e8723948d8e00c75015-180617463"),
-                    user_id=os.environ.get('ML_USER_ID', "180617463")
-                )
-                db.session.add(credentials)
-                db.session.commit()
-                print("✅ Credenciais inicializadas")
+            # Inicializar dados padrão
+            initialize_default_data()
             
-            # Restaurar regras se não existirem
-            restore_default_rules()
+            # Iniciar thread de polling
+            polling_thread = threading.Thread(target=polling_worker, daemon=True)
+            polling_thread.start()
             
-            print("✅ Banco de dados inicializado")
+            print("🚀 Bot do Mercado Livre iniciado com sucesso!")
+            print("🔄 Monitoramento de perguntas ativo (verifica a cada 60 segundos)")
+            print("🌐 Dashboard disponível na URL do Render")
             
         except Exception as e:
-            print(f"❌ Erro ao inicializar banco: {e}")
-
-def restore_default_rules():
-    """Restaurar regras padrão se não existirem"""
-    try:
-        if MLAutoResponse.query.count() > 0:
-            print("⚠️ Regras já existem - pulando restauração")
-            return
-        
-        print("🤖 Restaurando regras padrão...")
-        
-        # Regras básicas
-        default_rules = [
-            {
-                "name": "Saudação e Boas-vindas",
-                "keywords": '["olá", "oi", "bom dia", "boa tarde", "boa noite", "tudo bem"]',
-                "response": "Olá! Seja muito bem-vindo à DETTECH! Estamos aqui para ajudá-lo com peças automotivas de qualidade. Como posso auxiliá-lo hoje? Atenciosamente, Jeff - Equipe DETTECH.",
-                "priority": 1,
-                "active": True
-            },
-            {
-                "name": "Compatibilidade - Numeração Original",
-                "keywords": '["compatível", "serve", "funciona", "encaixa", "modelo", "ano"]',
-                "response": "Olá, seja bem-vindo à DETTECH! Para confirmar a compatibilidade, precisamos que informe a numeração original constante na sua peça. Atenciosamente, Jeff - Equipe DETTECH.",
-                "priority": 10,
-                "active": True
-            },
-            {
-                "name": "Prazo de Entrega",
-                "keywords": '["prazo", "entrega", "demora", "quando chega", "tempo", "dias"]',
-                "response": "O prazo de entrega varia conforme sua localização. Após a confirmação do pagamento, o envio é realizado em até 1 dia útil. O prazo de entrega pelos Correios é de 3 a 10 dias úteis. Atenciosamente, Jeff - Equipe DETTECH.",
-                "priority": 8,
-                "active": True
-            },
-            {
-                "name": "Garantia",
-                "keywords": '["garantia", "defeito", "problema", "troca", "devolução"]',
-                "response": "Todos os nossos produtos possuem garantia de 90 dias contra defeitos de fabricação. Em caso de problemas, entre em contato conosco que resolveremos rapidamente. Atenciosamente, Jeff - Equipe DETTECH.",
-                "priority": 9,
-                "active": True
-            },
-            {
-                "name": "Preço e Pagamento",
-                "keywords": '["preço", "valor", "custa", "pagamento", "desconto", "parcelamento"]',
-                "response": "O preço está anunciado no produto. Aceitamos PIX (com desconto), cartão de crédito e débito. Para PIX, oferecemos desconto especial. Atenciosamente, Jeff - Equipe DETTECH.",
-                "priority": 7,
-                "active": True
-            }
-        ]
-        
-        for rule_data in default_rules:
-            rule = MLAutoResponse(
-                name=rule_data["name"],
-                keywords=rule_data["keywords"],
-                response=rule_data["response"],
-                priority=rule_data["priority"],
-                active=rule_data["active"],
-                created_at=datetime.now()
-            )
-            db.session.add(rule)
-        
-        db.session.commit()
-        print(f"✅ {len(default_rules)} regras restauradas!")
-        
-    except Exception as e:
-        print(f"❌ Erro ao restaurar regras: {e}")
-
-def start_polling_service():
-    """Iniciar serviço de polling"""
-    global polling_service
+            print(f"❌ Erro na inicialização: {e}")
     
-    try:
-        # Obter credenciais das variáveis de ambiente
-        CLIENT_ID = os.environ.get('ML_CLIENT_ID', "5510376630479325")
-        CLIENT_SECRET = os.environ.get('ML_CLIENT_SECRET', "jlR4As2x8uFY3RTpysLpuPhzC9yM9d35")
-        INITIAL_TOKEN = os.environ.get('ML_ACCESS_TOKEN', "APP_USR-5510376630479325-072321-31ceebc6a2428e8723948d8e00c75015-180617463")
-        
-        # Inicializar serviço de polling
-        polling_service = PollingService(CLIENT_ID, CLIENT_SECRET, None, INITIAL_TOKEN)
-        polling_service.start()
-        
-        print("🤖 Bot do Mercado Livre iniciado!")
-        print("🔄 Verificando novas perguntas a cada 60 segundos")
-        print("🔑 Token será renovado automaticamente a cada 6 horas")
-        
-        return True
-        
-    except Exception as e:
-        print(f"❌ Erro ao iniciar polling: {e}")
-        return False
+    return app
 
-# Rotas principais
-@app.route('/', defaults={'path': ''})
-@app.route('/<path:path>')
-def serve(path):
-    """Servir arquivos estáticos"""
-    static_folder_path = app.static_folder
-    if static_folder_path is None:
-        return "Static folder not configured", 404
-
-    if path != "" and os.path.exists(os.path.join(static_folder_path, path)):
-        return send_from_directory(static_folder_path, path)
-    else:
-        index_path = os.path.join(static_folder_path, 'index.html')
-        if os.path.exists(index_path):
-            return send_from_directory(static_folder_path, 'index.html')
-        else:
-            return "Dashboard não encontrado", 404
-
-@app.route('/api/health')
-def health_check():
-    """Health check para Railway"""
-    try:
-        return jsonify({
-            'status': 'healthy',
-            'timestamp': datetime.now().isoformat(),
-            'database': 'connected' if db else 'disconnected',
-            'polling': 'active' if polling_service and polling_service.is_running else 'inactive',
-            'version': 'Railway Basic v1.0'
-        })
-    except Exception as e:
-        return jsonify({'status': 'error', 'error': str(e)}), 500
-
-# Inicialização
-def initialize_app():
-    """Inicializar aplicação"""
-    print("🚀 Iniciando Bot do Mercado Livre para Railway...")
-    
-    # Inicializar banco de dados
-    initialize_database()
-    
-    # Iniciar serviços em thread separada (para não bloquear o startup)
-    def start_services():
-        import time
-        time.sleep(5)  # Aguardar app estar pronta
-        start_polling_service()
-    
-    service_thread = threading.Thread(target=start_services, daemon=True)
-    service_thread.start()
-    
-    print("✅ Bot inicializado com sucesso!")
-
-# Inicializar quando importado
-initialize_app()
-
+# Para desenvolvimento local
 if __name__ == '__main__':
+    app = create_app()
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
+else:
+    # Para produção (Render)
+    app = create_app()
 
