@@ -1,0 +1,20 @@
+# Bot Mercado Livre - Railway Deploy
+# Versão básica sem IA
+
+# Framework web
+Flask==3.1.1
+flask-cors==6.0.0
+Flask-SQLAlchemy==3.1.1
+
+# HTTP requests
+requests==2.32.4
+
+# Banco de dados PostgreSQL
+psycopg2-binary==2.9.9
+
+# Utilitários
+python-dotenv==1.0.0
+
+# Servidor web
+gunicorn==21.2.0
+
