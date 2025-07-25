@@ -1,7 +1,7 @@
 import os
 import time
 import threading
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from flask import Flask, request, jsonify, redirect, url_for, render_template_string
 from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
@@ -11,25 +11,6 @@ import sqlite3
 # Configuração da aplicação
 app = Flask(__name__)
 CORS(app)
-
-# Configuração do fuso horário (UTC-3 para São Paulo)
-SAO_PAULO_TZ = timezone(timedelta(hours=-3))
-
-def get_local_time():
-    """Retorna o horário atual no fuso horário de São Paulo"""
-    return datetime.now(SAO_PAULO_TZ)
-
-def get_local_time_utc():
-    """Retorna o horário atual em UTC para salvar no banco"""
-    return datetime.utcnow()
-
-def format_local_time(utc_datetime):
-    """Converte UTC para horário local para exibição"""
-    if utc_datetime is None:
-        return None
-    utc_dt = utc_datetime.replace(tzinfo=timezone.utc)
-    local_dt = utc_dt.astimezone(SAO_PAULO_TZ)
-    return local_dt
 
 # Configuração do banco SQLite persistente
 DATA_DIR = os.getenv('DATA_DIR', '/opt/render/project/src/data')
@@ -44,10 +25,10 @@ app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
 
 # Configurações do Mercado Livre - TOKENS ATUALIZADOS
-ML_ACCESS_TOKEN = 'APP_USR-5510376630479325-072517-02c786d99866d9f7b2e62cc04b7e88fe-180617463'
-ML_CLIENT_ID = '5510376630479325'
-ML_CLIENT_SECRET = 'jlR4As2x8uFY3RTpysLpuPhzC9yM9d35'
-ML_USER_ID = '180617463'
+ML_CLIENT_ID = os.getenv('ML_CLIENT_ID', '5510376630479325')
+ML_CLIENT_SECRET = os.getenv('ML_CLIENT_SECRET', 'jlR4As2x8uFY3RTpysLpuPhzC9yM9d35')
+ML_ACCESS_TOKEN = os.getenv('ML_ACCESS_TOKEN', 'APP_USR-5510376630479325-072423-41cbc33fddb983f73eaf5aa1b1b7f699-180617463')
+ML_USER_ID = os.getenv('ML_USER_ID', '180617463')
 
 # Modelos do banco de dados
 class User(db.Model):
@@ -57,8 +38,8 @@ class User(db.Model):
     access_token = db.Column(db.String(200), nullable=False)
     refresh_token = db.Column(db.String(200))
     token_expires_at = db.Column(db.DateTime)
-    created_at = db.Column(db.DateTime, default=get_local_time_utc)
-    updated_at = db.Column(db.DateTime, default=get_local_time_utc, onupdate=get_local_time_utc)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 class AutoResponse(db.Model):
     __tablename__ = 'auto_responses'
@@ -67,8 +48,8 @@ class AutoResponse(db.Model):
     keywords = db.Column(db.Text, nullable=False)
     response_text = db.Column(db.Text, nullable=False)
     is_active = db.Column(db.Boolean, default=True)
-    created_at = db.Column(db.DateTime, default=get_local_time_utc)
-    updated_at = db.Column(db.DateTime, default=get_local_time_utc, onupdate=get_local_time_utc)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 class Question(db.Model):
     __tablename__ = 'questions'
@@ -80,7 +61,7 @@ class Question(db.Model):
     response_text = db.Column(db.Text)
     is_answered = db.Column(db.Boolean, default=False)
     answered_automatically = db.Column(db.Boolean, default=False)
-    created_at = db.Column(db.DateTime, default=get_local_time_utc)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
     answered_at = db.Column(db.DateTime)
 
 class AbsenceConfig(db.Model):
@@ -93,7 +74,7 @@ class AbsenceConfig(db.Model):
     end_time = db.Column(db.String(5))    # HH:MM
     days_of_week = db.Column(db.String(20))  # 0,1,2,3,4,5,6
     is_active = db.Column(db.Boolean, default=True)
-    created_at = db.Column(db.DateTime, default=get_local_time_utc)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
 class ResponseHistory(db.Model):
     __tablename__ = 'response_history'
@@ -103,7 +84,7 @@ class ResponseHistory(db.Model):
     response_type = db.Column(db.String(20), nullable=False)  # 'auto', 'absence', 'manual'
     keywords_matched = db.Column(db.String(200))
     response_time = db.Column(db.Float)  # tempo em segundos para responder
-    created_at = db.Column(db.DateTime, default=get_local_time_utc)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
 # Variável global para controlar inicialização
 _initialized = False
@@ -126,7 +107,7 @@ def initialize_database():
                     user = User(
                         ml_user_id=ML_USER_ID,
                         access_token=ML_ACCESS_TOKEN,
-                        token_expires_at=get_local_time_utc() + timedelta(hours=6)
+                        token_expires_at=datetime.utcnow() + timedelta(hours=6)
                     )
                     db.session.add(user)
                     db.session.commit()
@@ -224,14 +205,13 @@ def initialize_database():
                 
                 _initialized = True
                 print(f"✅ Banco de dados inicializado com sucesso em: {DATABASE_PATH}")
-                print(f"🕐 Fuso horário configurado: UTC-3 (São Paulo)")
                 
     except Exception as e:
         print(f"❌ Erro ao inicializar banco: {e}")
 
 # Função para verificar se está em horário de ausência
 def is_absence_time():
-    now = get_local_time()
+    now = datetime.now()
     current_time = now.strftime("%H:%M")
     current_weekday = str(now.weekday())  # 0=segunda, 6=domingo
     
@@ -363,7 +343,7 @@ def process_questions():
                             question.response_text = absence_message
                             question.is_answered = True
                             question.answered_automatically = True
-                            question.answered_at = get_local_time_utc()
+                            question.answered_at = datetime.utcnow()
                             response_type = "absence"
                             print(f"✅ Pergunta {question_id} respondida com mensagem de ausência")
                     else:
@@ -374,7 +354,7 @@ def process_questions():
                                 question.response_text = auto_response
                                 question.is_answered = True
                                 question.answered_automatically = True
-                                question.answered_at = get_local_time_utc()
+                                question.answered_at = datetime.utcnow()
                                 response_type = "auto"
                                 keywords_matched = matched_keywords
                                 print(f"✅ Pergunta {question_id} respondida automaticamente")
@@ -416,8 +396,8 @@ def get_real_time_stats():
     answered_auto = Question.query.filter_by(user_id=user.id, answered_automatically=True).count()
     pending_questions = Question.query.filter_by(user_id=user.id, is_answered=False).count()
     
-    # Estatísticas de hoje (usando horário local)
-    today = get_local_time().date()
+    # Estatísticas de hoje
+    today = datetime.now().date()
     today_questions = Question.query.filter_by(user_id=user.id).filter(
         db.func.date(Question.created_at) == today
     ).count()
@@ -469,10 +449,7 @@ def dashboard():
     stats = get_real_time_stats()
     
     # Status do token
-    token_status = "Válido" if user.token_expires_at and user.token_expires_at > get_local_time_utc() else "Expirado"
-    
-    # Horário local atual
-    current_local_time = get_local_time().strftime('%H:%M:%S')
+    token_status = "Válido" if user.token_expires_at and user.token_expires_at > datetime.utcnow() else "Expirado"
     
     html = f"""
     <!DOCTYPE html>
@@ -508,16 +485,13 @@ def dashboard():
             .performance {{ background: linear-gradient(135deg, #ff6900, #fcb900); color: white; }}
             .performance .stat-number {{ color: white; }}
             .performance .stat-label {{ color: rgba(255,255,255,0.9); }}
-            .timezone-info {{ background: linear-gradient(135deg, #6f42c1, #8e44ad); color: white; }}
-            .timezone-info .stat-number {{ color: white; font-size: 1.8em; }}
-            .timezone-info .stat-label {{ color: rgba(255,255,255,0.9); }}
         </style>
     </head>
     <body>
         <div class="container">
             <div class="header">
                 <h1>🤖 Bot do Mercado Livre</h1>
-                <p>Sistema Automatizado de Respostas - Fuso Horário: UTC-3 (São Paulo)</p>
+                <p>Sistema Automatizado de Respostas - Banco Persistente Ativo</p>
             </div>
             
             <div class="stats">
@@ -549,10 +523,6 @@ def dashboard():
                     <div class="stat-number">{stats['avg_response_time']}s</div>
                     <div class="stat-label">Tempo Médio de Resposta</div>
                 </div>
-                <div class="stat-card timezone-info">
-                    <div class="stat-number">{current_local_time}</div>
-                    <div class="stat-label">Horário Local (SP)</div>
-                </div>
             </div>
             
             <div class="status">
@@ -562,7 +532,6 @@ def dashboard():
                     <p><strong>Token:</strong> {token_status}</p>
                     <p><strong>Monitoramento:</strong> Ativo</p>
                     <p><strong>Banco:</strong> Persistente ({DATABASE_PATH})</p>
-                    <p><strong>Fuso Horário:</strong> UTC-3 (São Paulo)</p>
                 </div>
                 <div class="status-card connected">
                     <h3>📊 Configurações e Histórico</h3>
@@ -570,7 +539,7 @@ def dashboard():
                     <p><strong>Configurações de Ausência:</strong> {stats['absence_configs']}</p>
                     <p><strong>Respostas Automáticas:</strong> {stats['auto_responses']}</p>
                     <p><strong>Respostas de Ausência:</strong> {stats['absence_responses']}</p>
-                    <p><strong>Última Verificação:</strong> {current_local_time}</p>
+                    <p><strong>Última Verificação:</strong> {datetime.now().strftime('%H:%M:%S')}</p>
                 </div>
             </div>
             
@@ -647,8 +616,10 @@ def edit_rules_page():
             .btn:hover { background: #2968c8; }
             .btn-danger { background: #dc3545; }
             .btn-danger:hover { background: #c82333; }
+            .btn-success { background: #28a745; }
+            .btn-success:hover { background: #218838; }
             .rule-item { border: 1px solid #ddd; padding: 15px; margin-bottom: 10px; border-radius: 5px; }
-            .rule-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+            .rule-header { display: flex; justify-content: between; align-items: center; margin-bottom: 10px; }
             .status-toggle { margin-left: auto; }
             .alert { padding: 15px; margin-bottom: 20px; border-radius: 5px; }
             .alert-success { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
@@ -1097,6 +1068,8 @@ def edit_absence_page():
     """
     return html
 
+
+
 @app.route('/history')
 def history_page():
     if not _initialized:
@@ -1218,10 +1191,6 @@ def history_page():
         
         keywords_info = f" (Palavras: {history.keywords_matched})" if history.keywords_matched else ""
         
-        # Converter para horário local para exibição
-        local_time = format_local_time(history.created_at)
-        display_time = local_time.strftime('%d/%m/%Y %H:%M') if local_time else history.created_at.strftime('%d/%m/%Y %H:%M')
-        
         html += f"""
                 <div class="history-card">
                     <div class="history-header">
@@ -1235,7 +1204,7 @@ def history_page():
                     <div class="history-meta">
                         <span>⏱️ Tempo de resposta: {round(history.response_time, 2)}s</span>
                         {keywords_info}
-                        <span style="float: right;">📅 {display_time}</span>
+                        <span style="float: right;">📅 {history.created_at.strftime('%d/%m/%Y %H:%M')}</span>
                     </div>
                 </div>
         """
@@ -1295,11 +1264,6 @@ def rules_page():
     rules_html = ""
     for rule in rules:
         status = "✅ Ativa" if rule.is_active else "❌ Inativa"
-        
-        # Converter para horário local para exibição
-        local_time = format_local_time(rule.created_at)
-        display_time = local_time.strftime('%d/%m/%Y %H:%M') if local_time else rule.created_at.strftime('%d/%m/%Y %H:%M')
-        
         rules_html += f"""
         <div class="rule-card">
             <div class="rule-header">
@@ -1309,7 +1273,7 @@ def rules_page():
             <div class="rule-content">
                 <p><strong>Palavras-chave:</strong> {rule.keywords}</p>
                 <p><strong>Resposta:</strong> {rule.response_text}</p>
-                <p><strong>Criada em:</strong> {display_time}</p>
+                <p><strong>Criada em:</strong> {rule.created_at.strftime('%d/%m/%Y %H:%M')}</p>
             </div>
         </div>
         """
@@ -1368,16 +1332,6 @@ def questions_page():
         status = "✅ Respondida" if q.is_answered else "⏳ Pendente"
         auto_status = " (Automática)" if q.answered_automatically else ""
         
-        # Converter para horário local para exibição
-        local_created = format_local_time(q.created_at)
-        display_created = local_created.strftime('%d/%m/%Y %H:%M') if local_created else q.created_at.strftime('%d/%m/%Y %H:%M')
-        
-        answered_display = ""
-        if q.answered_at:
-            local_answered = format_local_time(q.answered_at)
-            display_answered = local_answered.strftime('%d/%m/%Y %H:%M') if local_answered else q.answered_at.strftime('%d/%m/%Y %H:%M')
-            answered_display = f'<p><strong>Respondida em:</strong> {display_answered}</p>'
-        
         questions_html += f"""
         <div class="question-card">
             <div class="question-header">
@@ -1387,8 +1341,8 @@ def questions_page():
             <div class="question-content">
                 <p><strong>Pergunta:</strong> {q.question_text}</p>
                 {f'<p><strong>Resposta:</strong> {q.response_text}</p>' if q.response_text else ''}
-                <p><strong>Data:</strong> {display_created}</p>
-                {answered_display}
+                <p><strong>Data:</strong> {q.created_at.strftime('%d/%m/%Y %H:%M')}</p>
+                {f'<p><strong>Respondida em:</strong> {q.answered_at.strftime("%d/%m/%Y %H:%M")}</p>' if q.answered_at else ''}
             </div>
         </div>
         """
@@ -1448,10 +1402,6 @@ def absence_page():
         }
         days = [days_map.get(d, d) for d in config.days_of_week.split(',')]
         
-        # Converter para horário local para exibição
-        local_time = format_local_time(config.created_at)
-        display_time = local_time.strftime('%d/%m/%Y %H:%M') if local_time else config.created_at.strftime('%d/%m/%Y %H:%M')
-        
         configs_html += f"""
         <div class="config-card">
             <div class="config-header">
@@ -1462,7 +1412,7 @@ def absence_page():
                 <p><strong>Mensagem:</strong> {config.message}</p>
                 <p><strong>Horário:</strong> {config.start_time} às {config.end_time}</p>
                 <p><strong>Dias:</strong> {', '.join(days)}</p>
-                <p><strong>Criada em:</strong> {display_time}</p>
+                <p><strong>Criada em:</strong> {config.created_at.strftime('%d/%m/%Y %H:%M')}</p>
             </div>
         </div>
         """
@@ -1561,7 +1511,7 @@ def api_rule_detail(rule_id):
         if 'response' in data:
             rule.response_text = data['response']
         
-        rule.updated_at = get_local_time_utc()
+        rule.updated_at = datetime.utcnow()
         db.session.commit()
         
         return jsonify({"message": "Regra atualizada com sucesso"})
@@ -1587,7 +1537,7 @@ def api_toggle_rule(rule_id):
     
     data = request.get_json()
     rule.is_active = data.get('active', False)
-    rule.updated_at = get_local_time_utc()
+    rule.updated_at = datetime.utcnow()
     
     db.session.commit()
     
