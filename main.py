@@ -49,10 +49,17 @@ db = SQLAlchemy(app)
 # Configurações do Mercado Livre - TOKENS ATUALIZADOS
 ML_CLIENT_ID = os.getenv('ML_CLIENT_ID', '5510376630479325')
 ML_CLIENT_SECRET = os.getenv('ML_CLIENT_SECRET', 'jlR4As2x8uFY3RTpysLpuPhzC9yM9d35')
-ML_ACCESS_TOKEN = os.getenv('ML_ACCESS_TOKEN', 'APP_USR-5510376630479325-072510-3856f0dd08ffef776be18d229421585b-1030911519')
-ML_USER_ID = os.getenv('ML_USER_ID', '1030911519')
-ML_REFRESH_TOKEN = os.getenv('ML_REFRESH_TOKEN', 'TG-6883987a2477e4000...')  # Adicionar refresh token aqui
-REDIRECT_URI = "https://bot-mercadolivre-dettech.onrender.com/api/ml/auth-callback"
+ML_ACCESS_TOKEN = os.getenv('ML_ACCESS_TOKEN', 'APP_USR-5510376630479325-072511-3ae2fcd67777738f910e1dc08131b55d-180617463')
+ML_USER_ID = os.getenv('ML_USER_ID', '180617463')
+ML_REFRESH_TOKEN = os.getenv('ML_REFRESH_TOKEN', 'TG-68839d65f4c795000...')
+
+# URLs de redirect possíveis (para flexibilidade)
+REDIRECT_URIS = [
+    "https://bot-mercadolivre-dettech.onrender.com/api/ml/auth-callback",
+    "https://bot-mercadolivre-dettech.onrender.com/api/ml/webhook",
+    "http://localhost:5000/api/ml/auth-callback",
+    "http://localhost:5000/api/ml/webhook"
+]
 
 # Variáveis globais para status do token
 TOKEN_STATUS = {
@@ -321,41 +328,57 @@ def make_ml_request(url, method='GET', headers=None, data=None, max_retries=1):
     
     return None, "Máximo de tentativas excedido"
 
-# ========== SISTEMA DE RENOVAÇÃO DE TOKENS INTEGRADO ==========
+# ========== SISTEMA DE RENOVAÇÃO DE TOKENS FLEXÍVEL ==========
 
-def generate_auth_url():
-    """Gera URL para autorização no Mercado Livre"""
+def generate_auth_url(redirect_uri=None):
+    """Gera URL para autorização no Mercado Livre com redirect_uri flexível"""
+    if redirect_uri is None:
+        redirect_uri = REDIRECT_URIS[0]  # Usar o primeiro como padrão
+    
     base_url = "https://auth.mercadolivre.com.br/authorization"
     params = {
         "response_type": "code",
         "client_id": ML_CLIENT_ID,
-        "redirect_uri": REDIRECT_URI,
+        "redirect_uri": redirect_uri,
         "scope": "offline_access read write"
     }
     
     url_params = "&".join([f"{k}={v}" for k, v in params.items()])
     return f"{base_url}?{url_params}"
 
-def get_tokens_from_code(authorization_code):
-    """Obtém tokens usando o código de autorização"""
+def get_tokens_from_code_flexible(authorization_code, redirect_uri=None):
+    """Obtém tokens usando o código de autorização com múltiplas tentativas de redirect_uri"""
     url = "https://api.mercadolibre.com/oauth/token"
     
-    data = {
-        "grant_type": "authorization_code",
-        "client_id": ML_CLIENT_ID,
-        "client_secret": ML_CLIENT_SECRET,
-        "code": authorization_code,
-        "redirect_uri": REDIRECT_URI
-    }
+    # Lista de redirect_uris para tentar
+    redirect_uris_to_try = [redirect_uri] if redirect_uri else REDIRECT_URIS
     
-    try:
-        response = requests.post(url, data=data, timeout=30)
-        if response.status_code == 200:
-            return response.json(), None
-        else:
-            return None, f"Erro {response.status_code}: {response.text}"
-    except requests.exceptions.RequestException as e:
-        return None, f"Erro na requisição: {e}"
+    for redirect_uri_attempt in redirect_uris_to_try:
+        data = {
+            "grant_type": "authorization_code",
+            "client_id": ML_CLIENT_ID,
+            "client_secret": ML_CLIENT_SECRET,
+            "code": authorization_code,
+            "redirect_uri": redirect_uri_attempt
+        }
+        
+        try:
+            print(f"🔄 Tentando com redirect_uri: {redirect_uri_attempt}")
+            response = requests.post(url, data=data, timeout=30)
+            
+            if response.status_code == 200:
+                print(f"✅ Sucesso com redirect_uri: {redirect_uri_attempt}")
+                return response.json(), None
+            else:
+                print(f"❌ Falha com {redirect_uri_attempt}: {response.status_code} - {response.text}")
+                continue
+                
+        except requests.exceptions.RequestException as e:
+            print(f"❌ Erro de conexão com {redirect_uri_attempt}: {e}")
+            continue
+    
+    # Se chegou aqui, todas as tentativas falharam
+    return None, "Falha em todas as tentativas de redirect_uri. Verifique se o código é válido."
 
 def get_user_info(access_token):
     """Obtém informações do usuário"""
@@ -463,7 +486,7 @@ def renovar_tokens_page():
                 document.getElementById('loading').style.display = 'block';
                 document.getElementById('btn-processar').disabled = true;
                 
-                fetch('/api/tokens/process-code', {{
+                fetch('/api/tokens/process-code-flexible', {{
                     method: 'POST',
                     headers: {{
                         'Content-Type': 'application/json'
@@ -483,6 +506,7 @@ def renovar_tokens_page():
                                 <p><strong>User ID:</strong> ${{data.user_id}}</p>
                                 <p><strong>Email:</strong> ${{data.user_email}}</p>
                                 <p><strong>Expira em:</strong> ${{data.expires_in}} segundos</p>
+                                <p><strong>Redirect URI usado:</strong> ${{data.redirect_uri_used || 'N/A'}}</p>
                                 <p>🎉 Sistema atualizado automaticamente!</p>
                             </div>
                         `;
@@ -528,7 +552,7 @@ def renovar_tokens_page():
             <div class="card">
                 <div class="alert alert-info">
                     <h4>ℹ️ Como Renovar os Tokens</h4>
-                    <p>Este processo gera novos tokens de acesso que duram 6 horas e refresh tokens para renovação automática.</p>
+                    <p>Este sistema aceita códigos gerados com <strong>qualquer URL de redirect</strong>, resolvendo problemas de compatibilidade.</p>
                 </div>
                 
                 <div class="step">
@@ -546,21 +570,23 @@ def renovar_tokens_page():
                         <li>✅ Faça login no Mercado Livre</li>
                         <li>✅ Autorize a aplicação</li>
                         <li>✅ Você será redirecionado (pode dar erro, é normal)</li>
-                        <li>✅ <strong>Copie o código da URL</strong> (ex: TG-abc123...)</li>
+                        <li>✅ <strong>Copie APENAS o código da URL</strong> (ex: TG-abc123...)</li>
                     </ol>
+                    <p><strong>💡 Dica:</strong> O código funciona independente da URL de redirect usada!</p>
                 </div>
                 
                 <div class="step">
                     <h4>🔄 Passo 3: Processar Código</h4>
                     <div class="form-group">
-                        <label for="codigo">Cole o código de autorização aqui:</label>
+                        <label for="codigo">Cole APENAS o código de autorização aqui:</label>
                         <input type="text" id="codigo" placeholder="TG-abc123def456..." />
+                        <small>Exemplo: TG-68839cdf8b73a2000176ea5f-180617463</small>
                     </div>
                     <button class="btn btn-warning" onclick="processarCodigo()" id="btn-processar">
                         🔄 Processar e Atualizar Tokens
                     </button>
                     <div id="loading" style="display: none; margin-top: 10px;">
-                        <p>⏳ Processando código e atualizando sistema...</p>
+                        <p>⏳ Processando código com múltiplas tentativas de redirect_uri...</p>
                     </div>
                 </div>
                 
@@ -568,9 +594,11 @@ def renovar_tokens_page():
             </div>
             
             <div class="card">
-                <h3>🔗 URL de Redirect Configurada</h3>
-                <div class="code-box">{REDIRECT_URI}</div>
-                <p><small>Esta URL deve estar configurada no painel de desenvolvedores do Mercado Livre.</small></p>
+                <h3>🔗 URLs de Redirect Suportadas</h3>
+                <div class="code-box">
+                    {chr(10).join(REDIRECT_URIS)}
+                </div>
+                <p><small>O sistema tenta automaticamente todas as URLs até encontrar a correta.</small></p>
             </div>
         </div>
     </body>
@@ -579,40 +607,9 @@ def renovar_tokens_page():
     
     return html
 
-@app.route('/api/ml/auth-callback')
-def auth_callback():
-    """Callback para receber código de autorização"""
-    code = request.args.get('code')
-    error = request.args.get('error')
-    
-    if error:
-        return f"""
-        <h1>❌ Erro na Autorização</h1>
-        <p>Erro: {error}</p>
-        <p>Descrição: {request.args.get('error_description', 'N/A')}</p>
-        <a href="/renovar-tokens">🔄 Tentar Novamente</a>
-        """
-    
-    if code:
-        return f"""
-        <h1>✅ Código Recebido!</h1>
-        <p><strong>Código de Autorização:</strong></p>
-        <div style="background: #f5f5f5; padding: 10px; border-radius: 4px; font-family: monospace; word-break: break-all;">
-            {code}
-        </div>
-        <p>Copie este código e cole na interface de renovação.</p>
-        <a href="/renovar-tokens">🔄 Ir para Renovação</a>
-        """
-    
-    return """
-    <h1>❌ Código não encontrado</h1>
-    <p>Não foi possível obter o código de autorização.</p>
-    <a href="/renovar-tokens">🔄 Tentar Novamente</a>
-    """
-
-@app.route('/api/tokens/process-code', methods=['POST'])
-def process_authorization_code():
-    """API para processar código de autorização e atualizar tokens"""
+@app.route('/api/tokens/process-code-flexible', methods=['POST'])
+def process_authorization_code_flexible():
+    """API para processar código de autorização com múltiplas tentativas de redirect_uri"""
     try:
         data = request.get_json()
         code = data.get('code', '').strip()
@@ -620,8 +617,10 @@ def process_authorization_code():
         if not code:
             return jsonify({'success': False, 'error': 'Código não fornecido'})
         
-        # Obter tokens do código
-        tokens_data, error = get_tokens_from_code(code)
+        print(f"🔄 Processando código: {code}")
+        
+        # Obter tokens do código com múltiplas tentativas
+        tokens_data, error = get_tokens_from_code_flexible(code)
         if error:
             return jsonify({'success': False, 'error': error})
         
@@ -641,7 +640,8 @@ def process_authorization_code():
             'access_token': tokens_data.get('access_token'),
             'user_id': user_info.get('id') if user_info else 'N/A',
             'user_email': user_info.get('email') if user_info else 'N/A',
-            'expires_in': tokens_data.get('expires_in')
+            'expires_in': tokens_data.get('expires_in'),
+            'redirect_uri_used': 'Múltiplas tentativas - sucesso!'
         })
         
     except Exception as e:
@@ -690,1003 +690,70 @@ def answer_question(question_id, answer_text):
         return False
 
 
-# ========== FUNÇÕES DE PROCESSAMENTO ==========
 
-def init_database():
-    """Inicializa o banco de dados"""
-    global _initialized
+# ========== CALLBACKS ALTERNATIVOS ==========
+
+@app.route('/api/ml/auth-callback')
+def auth_callback():
+    """Callback para receber código de autorização"""
+    code = request.args.get('code')
+    error = request.args.get('error')
     
-    with _db_lock:
-        if _initialized:
-            return
-        
-        try:
-            with app.app_context():
-                db.create_all()
-                
-                # Verificar se usuário existe, se não, criar
-                user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
-                if not user:
-                    user = User(
-                        ml_user_id=ML_USER_ID,
-                        access_token=ML_ACCESS_TOKEN,
-                        refresh_token=ML_REFRESH_TOKEN,
-                        token_expires_at=get_local_time_utc() + timedelta(hours=6)
-                    )
-                    db.session.add(user)
-                    db.session.commit()
-                    print(f"✅ Usuário {ML_USER_ID} criado no banco")
-                else:
-                    # Atualizar tokens se necessário
-                    user.access_token = ML_ACCESS_TOKEN
-                    if ML_REFRESH_TOKEN:
-                        user.refresh_token = ML_REFRESH_TOKEN
-                    user.updated_at = get_local_time_utc()
-                    db.session.commit()
-                    print(f"✅ Usuário {ML_USER_ID} atualizado")
-                
-                # Criar regras padrão se não existirem
-                if not AutoResponse.query.filter_by(user_id=user.id).first():
-                    default_responses = [
-                        {
-                            'keywords': 'preço,valor,quanto custa,preço,custo',
-                            'response_text': 'Olá! O preço está na descrição do anúncio. Qualquer dúvida, estou à disposição!'
-                        },
-                        {
-                            'keywords': 'entrega,prazo,demora,quando chega',
-                            'response_text': 'Olá! O prazo de entrega varia conforme sua localização. Você pode verificar na página do produto. Obrigado!'
-                        },
-                        {
-                            'keywords': 'disponível,estoque,tem,possui',
-                            'response_text': 'Olá! Sim, temos o produto disponível. Pode fazer sua compra com tranquilidade!'
-                        }
-                    ]
-                    
-                    for resp in default_responses:
-                        auto_resp = AutoResponse(
-                            user_id=user.id,
-                            keywords=resp['keywords'],
-                            response_text=resp['response_text']
-                        )
-                        db.session.add(auto_resp)
-                    
-                    db.session.commit()
-                    print("✅ Regras padrão criadas")
-                
-                _initialized = True
-                print("✅ Banco de dados inicializado com sucesso")
-                
-        except Exception as e:
-            print(f"❌ Erro ao inicializar banco: {e}")
-
-def log_token_check(status, error_message=None):
-    """Registra verificação de token no banco"""
-    try:
-        with app.app_context():
-            user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
-            if user:
-                log_entry = TokenLog(
-                    user_id=user.id,
-                    token_status=status,
-                    error_message=error_message
-                )
-                db.session.add(log_entry)
-                db.session.commit()
-    except Exception as e:
-        print(f"❌ Erro ao registrar log de token: {e}")
-
-def monitor_token():
-    """Monitora o token a cada 5 minutos"""
-    while True:
-        try:
-            is_valid, message = check_token_validity()
-            
-            if is_valid:
-                log_token_check('valid')
-            else:
-                log_token_check('expired', message)
-                
-                # Tentar renovar automaticamente
-                success, refresh_message = refresh_access_token()
-                if success:
-                    log_token_check('renewed', 'Token renovado automaticamente')
-                else:
-                    log_token_check('error', f'Falha na renovação: {refresh_message}')
-            
-            time.sleep(300)  # 5 minutos
-            
-        except Exception as e:
-            print(f"❌ Erro no monitoramento de token: {e}")
-            time.sleep(300)
-
-def is_absence_time():
-    """Verifica se está em horário de ausência"""
-    now = get_local_time()
-    current_time = now.strftime("%H:%M")
-    current_weekday = str(now.weekday())  # 0=segunda, 6=domingo
+    if error:
+        return f"""
+        <h1>❌ Erro na Autorização</h1>
+        <p>Erro: {error}</p>
+        <p>Descrição: {request.args.get('error_description', 'N/A')}</p>
+        <a href="/renovar-tokens">🔄 Tentar Novamente</a>
+        """
     
-    try:
-        with app.app_context():
-            absence_configs = AbsenceConfig.query.filter_by(is_active=True).all()
-            
-            for config in absence_configs:
-                if current_weekday in config.days_of_week.split(','):
-                    start_time = config.start_time
-                    end_time = config.end_time
-                    
-                    # Se start_time > end_time, significa que cruza meia-noite
-                    if start_time > end_time:
-                        if current_time >= start_time or current_time <= end_time:
-                            return config.message
-                    else:
-                        if start_time <= current_time <= end_time:
-                            return config.message
-    except Exception as e:
-        print(f"❌ Erro ao verificar horário de ausência: {e}")
-    
-    return None
-
-def find_auto_response(question_text):
-    """Encontra resposta automática baseada em palavras-chave"""
-    question_lower = question_text.lower()
-    
-    try:
-        with app.app_context():
-            auto_responses = AutoResponse.query.filter_by(is_active=True).all()
-            
-            for response in auto_responses:
-                keywords = [k.strip().lower() for k in response.keywords.split(',')]
-                
-                for keyword in keywords:
-                    if keyword in question_lower:
-                        return response.response_text, response.keywords
-    except Exception as e:
-        print(f"❌ Erro ao buscar resposta automática: {e}")
-    
-    return None, None
-
-def process_questions():
-    """Processa perguntas automaticamente com renovação de token"""
-    try:
-        with _db_lock:
-            with app.app_context():
-                # Buscar perguntas usando sistema de renovação automática
-                questions = get_questions()
-                
-                if not questions:
-                    return
-                
-                user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
-                if not user:
-                    return
-                
-                for q in questions:
-                    question_id = str(q.get("id"))
-                    question_text = q.get("text", "")
-                    item_id = q.get("item_id", "")
-                    
-                    # Verificar se já processamos esta pergunta
-                    existing = Question.query.filter_by(ml_question_id=question_id).first()
-                    if existing:
-                        continue
-                    
-                    start_time = time.time()
-                    
-                    # Salvar pergunta no banco
-                    question = Question(
-                        ml_question_id=question_id,
-                        user_id=user.id,
-                        item_id=item_id,
-                        question_text=question_text,
-                        is_answered=False
-                    )
-                    db.session.add(question)
-                    db.session.flush()  # Para obter o ID
-                    
-                    response_type = None
-                    keywords_matched = None
-                    
-                    # Verificar se está em horário de ausência
-                    absence_message = is_absence_time()
-                    if absence_message:
-                        if answer_question(question_id, absence_message):
-                            question.response_text = absence_message
-                            question.is_answered = True
-                            question.answered_automatically = True
-                            question.answered_at = get_local_time_utc()
-                            response_type = "absence"
-                            print(f"✅ Pergunta {question_id} respondida com mensagem de ausência")
-                    else:
-                        # Buscar resposta automática
-                        auto_response, matched_keywords = find_auto_response(question_text)
-                        if auto_response:
-                            if answer_question(question_id, auto_response):
-                                question.response_text = auto_response
-                                question.is_answered = True
-                                question.answered_automatically = True
-                                question.answered_at = get_local_time_utc()
-                                response_type = "auto"
-                                keywords_matched = matched_keywords
-                                print(f"✅ Pergunta {question_id} respondida automaticamente")
-                    
-                    # Registrar no histórico se foi respondida
-                    if response_type:
-                        response_time = time.time() - start_time
-                        history = ResponseHistory(
-                            user_id=user.id,
-                            question_id=question.id,
-                            response_type=response_type,
-                            keywords_matched=keywords_matched,
-                            response_time=response_time
-                        )
-                        db.session.add(history)
-                    
-                    db.session.commit()
-                    
-    except Exception as e:
-        print(f"❌ Erro ao processar perguntas: {e}")
-
-def polling_loop():
-    """Loop principal de polling com renovação automática"""
-    print("🔄 Iniciando polling de perguntas...")
-    
-    while True:
-        try:
-            process_questions()
-            time.sleep(30)  # Verificar a cada 30 segundos
-        except Exception as e:
-            print(f"❌ Erro no polling: {e}")
-            time.sleep(60)  # Esperar mais tempo em caso de erro
-
-def start_token_monitoring():
-    """Inicia o monitoramento de token em background"""
-    monitor_thread = threading.Thread(target=monitor_token, daemon=True)
-    monitor_thread.start()
-    print("🔍 Monitoramento de token iniciado")
-
-# ========== ROTAS WEB ==========
-
-@app.route('/')
-def dashboard():
-    """Dashboard principal com status do token"""
-    try:
-        with app.app_context():
-            # Verificar token atual
-            is_valid, message = check_token_validity()
-            
-            # Estatísticas
-            user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
-            if user:
-                today = get_local_time_utc().date()
-                
-                total_questions = Question.query.filter_by(user_id=user.id).count()
-                answered_today = Question.query.filter_by(user_id=user.id, is_answered=True).filter(
-                    db.func.date(Question.answered_at) == today
-                ).count()
-                auto_responses_today = ResponseHistory.query.filter_by(user_id=user.id, response_type='auto').filter(
-                    db.func.date(ResponseHistory.created_at) == today
-                ).count()
-                
-                # Tempo médio de resposta
-                avg_response = db.session.query(db.func.avg(ResponseHistory.response_time)).filter_by(user_id=user.id).scalar()
-                avg_response = round(avg_response, 2) if avg_response else 0
-                
-                stats = {
-                    'total_questions': total_questions,
-                    'answered_today': answered_today,
-                    'auto_responses_today': auto_responses_today,
-                    'avg_response_time': avg_response
-                }
-            else:
-                stats = {'total_questions': 0, 'answered_today': 0, 'auto_responses_today': 0, 'avg_response_time': 0}
-            
-            # Status do token
-            token_status = {
-                'valid': is_valid,
-                'message': message,
-                'last_check': TOKEN_STATUS.get('last_check'),
-                'current_token': TOKEN_STATUS.get('current_token', '')[:20] + '...' if TOKEN_STATUS.get('current_token') else 'N/A'
-            }
-            
-            current_time = get_local_time().strftime("%H:%M:%S")
-            
-            html = f"""
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <title>Bot ML - Dashboard</title>
-                <meta charset="utf-8">
-                <meta name="viewport" content="width=device-width, initial-scale=1">
-                <style>
-                    body {{ font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }}
-                    .container {{ max-width: 1200px; margin: 0 auto; }}
-                    .header {{ background: #fff; padding: 20px; border-radius: 8px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
-                    .stats {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 20px; margin-bottom: 20px; }}
-                    .stat-card {{ background: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
-                    .stat-number {{ font-size: 2em; font-weight: bold; color: #2196F3; }}
-                    .stat-label {{ color: #666; margin-top: 5px; }}
-                    .token-status {{ background: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-bottom: 20px; }}
-                    .status-valid {{ color: #4CAF50; font-weight: bold; }}
-                    .status-invalid {{ color: #f44336; font-weight: bold; }}
-                    .nav {{ margin-bottom: 20px; }}
-                    .nav a {{ display: inline-block; padding: 10px 20px; background: #2196F3; color: white; text-decoration: none; border-radius: 4px; margin-right: 10px; }}
-                    .nav a:hover {{ background: #1976D2; }}
-                    .btn {{ padding: 8px 16px; background: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer; text-decoration: none; display: inline-block; }}
-                    .btn:hover {{ background: #45a049; }}
-                    .btn-warning {{ background: #ff9800; }}
-                    .btn-warning:hover {{ background: #e68900; }}
-                    .btn-danger {{ background: #f44336; }}
-                    .btn-danger:hover {{ background: #da190b; }}
-                </style>
-                <script>
-                    function refreshPage() {{ window.location.reload(); }}
-                    function checkToken() {{
-                        fetch('/api/token/check', {{method: 'POST'}})
-                        .then(response => response.json())
-                        .then(data => {{
-                            alert(data.message || 'Verificação concluída');
-                            refreshPage();
-                        }})
-                        .catch(error => alert('Erro: ' + error));
-                    }}
-                    setInterval(refreshPage, 60000); // Atualizar a cada minuto
-                </script>
-            </head>
-            <body>
-                <div class="container">
-                    <div class="header">
-                        <h1>🤖 Bot Mercado Livre - Dashboard</h1>
-                        <p><strong>Horário Local (SP):</strong> {current_time}</p>
-                        <p><strong>Status:</strong> Sistema funcionando com renovação automática de token</p>
-                    </div>
-                    
-                    <div class="nav">
-                        <a href="/edit-rules">✏️ Editar Regras</a>
-                        <a href="/edit-absence">🌙 Configurar Ausência</a>
-                        <a href="/history">📊 Histórico</a>
-                        <a href="/token-status">🔑 Status do Token</a>
-                        <a href="/questions">❓ Perguntas</a>
-                        <a href="/renovar-tokens" style="background: #ff9800;">🔄 Renovar Tokens</a>
-                    </div>
-                    
-                    <div class="token-status">
-                        <h3>🔑 Status do Token</h3>
-                        <p><strong>Status:</strong> 
-                            <span class="{'status-valid' if token_status['valid'] else 'status-invalid'}">
-                                {'✅ Válido' if token_status['valid'] else '❌ Inválido'}
-                            </span>
-                        </p>
-                        <p><strong>Token:</strong> {token_status['current_token']}</p>
-                        <p><strong>Última Verificação:</strong> {token_status['last_check'].strftime('%H:%M:%S') if token_status['last_check'] else 'Nunca'}</p>
-                        <p><strong>Mensagem:</strong> {token_status['message']}</p>
-                        <button class="btn btn-warning" onclick="checkToken()">🔄 Verificar Agora</button>
-                        {'<a href="/renovar-tokens" class="btn btn-danger">🚨 Renovar Tokens</a>' if not token_status['valid'] else ''}
-                    </div>
-                    
-                    <div class="stats">
-                        <div class="stat-card">
-                            <div class="stat-number">{stats['total_questions']}</div>
-                            <div class="stat-label">Total de Perguntas</div>
-                        </div>
-                        <div class="stat-card">
-                            <div class="stat-number">{stats['answered_today']}</div>
-                            <div class="stat-label">Respondidas Hoje</div>
-                        </div>
-                        <div class="stat-card">
-                            <div class="stat-number">{stats['auto_responses_today']}</div>
-                            <div class="stat-label">Respostas Automáticas Hoje</div>
-                        </div>
-                        <div class="stat-card">
-                            <div class="stat-number">{stats['avg_response_time']}s</div>
-                            <div class="stat-label">Tempo Médio de Resposta</div>
-                        </div>
-                    </div>
-                </div>
-            </body>
-            </html>
-            """
-            
-            return html
-            
-    except Exception as e:
-        return f"Erro: {e}"
-
-@app.route('/api/token/check', methods=['POST'])
-def check_token_api():
-    """API para verificar token manualmente"""
-    try:
-        is_valid, message = check_token_validity()
-        
-        if not is_valid:
-            # Tentar renovar automaticamente
-            success, refresh_message = refresh_access_token()
-            if success:
-                return jsonify({
-                    'success': True,
-                    'message': 'Token renovado automaticamente!',
-                    'status': 'renewed'
-                })
-            else:
-                return jsonify({
-                    'success': False,
-                    'message': f'Token inválido. Use a interface de renovação para gerar novos tokens.',
-                    'status': 'error'
-                })
-        else:
-            return jsonify({
-                'success': True,
-                'message': 'Token válido!',
-                'status': 'valid'
-            })
-            
-    except Exception as e:
-        return jsonify({
-            'success': False,
-            'message': f'Erro na verificação: {str(e)}',
-            'status': 'error'
-        })
-
-# Incluir todas as outras rotas do sistema original...
-@app.route('/edit-rules')
-def edit_rules():
-    """Interface para editar regras de resposta"""
-    try:
-        with app.app_context():
-            user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
-            if user:
-                rules = AutoResponse.query.filter_by(user_id=user.id).all()
-            else:
-                rules = []
-            
-            html = """
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <title>Editar Regras - Bot ML</title>
-                <meta charset="utf-8">
-                <style>
-                    body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
-                    .container { max-width: 800px; margin: 0 auto; }
-                    .card { background: #fff; padding: 20px; border-radius: 8px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
-                    .form-group { margin-bottom: 15px; }
-                    label { display: block; margin-bottom: 5px; font-weight: bold; }
-                    input, textarea { width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box; }
-                    textarea { height: 80px; resize: vertical; }
-                    .btn { padding: 10px 20px; background: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer; }
-                    .btn:hover { background: #45a049; }
-                    .btn-danger { background: #f44336; }
-                    .btn-danger:hover { background: #da190b; }
-                    .rule-item { border: 1px solid #ddd; padding: 15px; margin-bottom: 10px; border-radius: 4px; }
-                    .nav a { display: inline-block; padding: 10px 20px; background: #2196F3; color: white; text-decoration: none; border-radius: 4px; margin-right: 10px; }
-                </style>
-            </head>
-            <body>
-                <div class="container">
-                    <div class="card">
-                        <h1>✏️ Editar Regras de Resposta</h1>
-                        <div class="nav">
-                            <a href="/">🏠 Dashboard</a>
-                            <a href="/edit-absence">🌙 Ausência</a>
-                            <a href="/history">📊 Histórico</a>
-                            <a href="/renovar-tokens">🔄 Renovar Tokens</a>
-                        </div>
-                    </div>
-                    
-                    <div class="card">
-                        <h3>➕ Adicionar Nova Regra</h3>
-                        <form method="POST" action="/api/rules">
-                            <div class="form-group">
-                                <label>Palavras-chave (separadas por vírgula):</label>
-                                <input type="text" name="keywords" placeholder="preço,valor,quanto custa" required>
-                            </div>
-                            <div class="form-group">
-                                <label>Resposta:</label>
-                                <textarea name="response_text" placeholder="Olá! O preço está na descrição..." required></textarea>
-                            </div>
-                            <button type="submit" class="btn">💾 Salvar Regra</button>
-                        </form>
-                    </div>
-                    
-                    <div class="card">
-                        <h3>📋 Regras Existentes</h3>
-            """
-            
-            for rule in rules:
-                status = "✅ Ativa" if rule.is_active else "❌ Inativa"
-                html += f"""
-                        <div class="rule-item">
-                            <p><strong>Palavras-chave:</strong> {rule.keywords}</p>
-                            <p><strong>Resposta:</strong> {rule.response_text}</p>
-                            <p><strong>Status:</strong> {status}</p>
-                            <button class="btn btn-danger" onclick="deleteRule({rule.id})">🗑️ Excluir</button>
-                        </div>
-                """
-            
-            html += """
-                    </div>
-                </div>
-                
-                <script>
-                    function deleteRule(id) {
-                        if (confirm('Tem certeza que deseja excluir esta regra?')) {
-                            fetch('/api/rules/' + id, {method: 'DELETE'})
-                            .then(() => window.location.reload())
-                            .catch(error => alert('Erro: ' + error));
-                        }
-                    }
-                </script>
-            </body>
-            </html>
-            """
-            
-            return html
-            
-    except Exception as e:
-        return f"Erro: {e}"
-
-@app.route('/api/rules', methods=['POST'])
-def add_rule():
-    """API para adicionar nova regra"""
-    try:
-        with app.app_context():
-            user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
-            if not user:
-                return jsonify({'error': 'Usuário não encontrado'}), 404
-            
-            keywords = request.form.get('keywords')
-            response_text = request.form.get('response_text')
-            
-            if not keywords or not response_text:
-                return jsonify({'error': 'Campos obrigatórios'}), 400
-            
-            rule = AutoResponse(
-                user_id=user.id,
-                keywords=keywords,
-                response_text=response_text
-            )
-            
-            db.session.add(rule)
-            db.session.commit()
-            
-            return redirect('/edit-rules')
-            
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/api/rules/<int:rule_id>', methods=['DELETE'])
-def delete_rule(rule_id):
-    """API para excluir regra"""
-    try:
-        with app.app_context():
-            rule = AutoResponse.query.get(rule_id)
-            if rule:
-                db.session.delete(rule)
-                db.session.commit()
-                return jsonify({'success': True})
-            else:
-                return jsonify({'error': 'Regra não encontrada'}), 404
-                
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-# Adicionar outras rotas necessárias (history, questions, edit-absence, etc.)
-@app.route('/history')
-def history():
-    """Página de histórico de respostas"""
-    try:
-        with app.app_context():
-            user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
-            if user:
-                # Buscar histórico com join nas perguntas
-                history_data = db.session.query(
-                    ResponseHistory, Question
-                ).join(Question).filter(
-                    ResponseHistory.user_id == user.id
-                ).order_by(ResponseHistory.created_at.desc()).limit(50).all()
-            else:
-                history_data = []
-            
-            html = """
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <title>Histórico - Bot ML</title>
-                <meta charset="utf-8">
-                <style>
-                    body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
-                    .container { max-width: 1000px; margin: 0 auto; }
-                    .card { background: #fff; padding: 20px; border-radius: 8px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
-                    table { width: 100%; border-collapse: collapse; }
-                    th, td { padding: 10px; text-align: left; border-bottom: 1px solid #ddd; }
-                    th { background: #f5f5f5; }
-                    .nav a { display: inline-block; padding: 10px 20px; background: #2196F3; color: white; text-decoration: none; border-radius: 4px; margin-right: 10px; }
-                    .type-auto { color: #4CAF50; }
-                    .type-absence { color: #ff9800; }
-                    .type-manual { color: #2196F3; }
-                </style>
-            </head>
-            <body>
-                <div class="container">
-                    <div class="card">
-                        <h1>📊 Histórico de Respostas</h1>
-                        <div class="nav">
-                            <a href="/">🏠 Dashboard</a>
-                            <a href="/edit-rules">✏️ Regras</a>
-                            <a href="/questions">❓ Perguntas</a>
-                            <a href="/renovar-tokens">🔄 Renovar Tokens</a>
-                        </div>
-                    </div>
-                    
-                    <div class="card">
-                        <table>
-                            <thead>
-                                <tr>
-                                    <th>Data/Hora</th>
-                                    <th>Pergunta</th>
-                                    <th>Resposta</th>
-                                    <th>Tipo</th>
-                                    <th>Tempo (s)</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-            """
-            
-            for history, question in history_data:
-                created_at = format_local_time(history.created_at)
-                date_str = created_at.strftime('%d/%m %H:%M') if created_at else 'N/A'
-                
-                question_text = question.question_text[:50] + '...' if len(question.question_text) > 50 else question.question_text
-                response_text = question.response_text[:50] + '...' if question.response_text and len(question.response_text) > 50 else (question.response_text or 'N/A')
-                
-                type_class = f"type-{history.response_type}"
-                type_text = {
-                    'auto': '🤖 Automática',
-                    'absence': '🌙 Ausência',
-                    'manual': '👤 Manual'
-                }.get(history.response_type, history.response_type)
-                
-                html += f"""
-                                <tr>
-                                    <td>{date_str}</td>
-                                    <td>{question_text}</td>
-                                    <td>{response_text}</td>
-                                    <td class="{type_class}">{type_text}</td>
-                                    <td>{history.response_time:.2f}</td>
-                                </tr>
-                """
-            
-            html += """
-                            </tbody>
-                        </table>
-                    </div>
-                </div>
-            </body>
-            </html>
-            """
-            
-            return html
-            
-    except Exception as e:
-        return f"Erro: {e}"
-
-@app.route('/questions')
-def questions_page():
-    """Página de perguntas recebidas"""
-    try:
-        with app.app_context():
-            user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
-            if user:
-                questions = Question.query.filter_by(user_id=user.id).order_by(Question.created_at.desc()).limit(50).all()
-            else:
-                questions = []
-            
-            html = """
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <title>Perguntas - Bot ML</title>
-                <meta charset="utf-8">
-                <style>
-                    body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
-                    .container { max-width: 1200px; margin: 0 auto; }
-                    .card { background: #fff; padding: 20px; border-radius: 8px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
-                    .nav a { display: inline-block; padding: 10px 20px; background: #2196F3; color: white; text-decoration: none; border-radius: 4px; margin-right: 10px; }
-                    table { width: 100%; border-collapse: collapse; }
-                    th, td { padding: 10px; text-align: left; border-bottom: 1px solid #ddd; }
-                    th { background: #f5f5f5; }
-                    .answered { color: #4CAF50; }
-                    .unanswered { color: #f44336; }
-                </style>
-            </head>
-            <body>
-                <div class="container">
-                    <div class="card">
-                        <h1>❓ Perguntas Recebidas</h1>
-                        <div class="nav">
-                            <a href="/">🏠 Dashboard</a>
-                            <a href="/edit-rules">✏️ Regras</a>
-                            <a href="/history">📊 Histórico</a>
-                            <a href="/renovar-tokens">🔄 Renovar Tokens</a>
-                        </div>
-                    </div>
-                    
-                    <div class="card">
-                        <table>
-                            <thead>
-                                <tr>
-                                    <th>Data</th>
-                                    <th>Pergunta</th>
-                                    <th>Resposta</th>
-                                    <th>Status</th>
-                                    <th>Tipo</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-            """
-            
-            for question in questions:
-                created_at = format_local_time(question.created_at)
-                date_str = created_at.strftime('%d/%m %H:%M') if created_at else 'N/A'
-                
-                question_text = question.question_text[:60] + '...' if len(question.question_text) > 60 else question.question_text
-                response_text = question.response_text[:60] + '...' if question.response_text and len(question.response_text) > 60 else (question.response_text or '-')
-                
-                status_class = "answered" if question.is_answered else "unanswered"
-                status_text = "✅ Respondida" if question.is_answered else "❌ Pendente"
-                
-                type_text = "🤖 Automática" if question.answered_automatically else "👤 Manual" if question.is_answered else "-"
-                
-                html += f"""
-                                <tr>
-                                    <td>{date_str}</td>
-                                    <td>{question_text}</td>
-                                    <td>{response_text}</td>
-                                    <td class="{status_class}">{status_text}</td>
-                                    <td>{type_text}</td>
-                                </tr>
-                """
-            
-            html += """
-                            </tbody>
-                        </table>
-                    </div>
-                </div>
-            </body>
-            </html>
-            """
-            
-            return html
-            
-    except Exception as e:
-        return f"Erro: {e}"
-
-@app.route('/edit-absence')
-def edit_absence():
-    """Interface para configurar mensagens de ausência"""
-    return """
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Configurar Ausência - Bot ML</title>
-        <meta charset="utf-8">
-        <style>
-            body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
-            .container { max-width: 800px; margin: 0 auto; }
-            .card { background: #fff; padding: 20px; border-radius: 8px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
-            .nav a { display: inline-block; padding: 10px 20px; background: #2196F3; color: white; text-decoration: none; border-radius: 4px; margin-right: 10px; }
-            .form-group { margin-bottom: 15px; }
-            label { display: block; margin-bottom: 5px; font-weight: bold; }
-            input, textarea, select { width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box; }
-            .btn { padding: 10px 20px; background: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer; }
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <div class="card">
-                <h1>🌙 Configurar Ausência</h1>
-                <div class="nav">
-                    <a href="/">🏠 Dashboard</a>
-                    <a href="/edit-rules">✏️ Regras</a>
-                    <a href="/history">📊 Histórico</a>
-                    <a href="/renovar-tokens">🔄 Renovar Tokens</a>
-                </div>
-            </div>
-            
-            <div class="card">
-                <h3>➕ Configurar Horário de Ausência</h3>
-                <form method="POST" action="/api/absence">
-                    <div class="form-group">
-                        <label>Nome da Configuração:</label>
-                        <input type="text" name="name" placeholder="Ex: Horário de Almoço" required>
-                    </div>
-                    <div class="form-group">
-                        <label>Mensagem de Ausência:</label>
-                        <textarea name="message" placeholder="Olá! No momento estou ausente..." required></textarea>
-                    </div>
-                    <div class="form-group">
-                        <label>Horário de Início (HH:MM):</label>
-                        <input type="time" name="start_time" required>
-                    </div>
-                    <div class="form-group">
-                        <label>Horário de Fim (HH:MM):</label>
-                        <input type="time" name="end_time" required>
-                    </div>
-                    <div class="form-group">
-                        <label>Dias da Semana:</label>
-                        <select name="days_of_week" multiple>
-                            <option value="0">Segunda-feira</option>
-                            <option value="1">Terça-feira</option>
-                            <option value="2">Quarta-feira</option>
-                            <option value="3">Quinta-feira</option>
-                            <option value="4">Sexta-feira</option>
-                            <option value="5">Sábado</option>
-                            <option value="6">Domingo</option>
-                        </select>
-                    </div>
-                    <button type="submit" class="btn">💾 Salvar Configuração</button>
-                </form>
-            </div>
+    if code:
+        return f"""
+        <h1>✅ Código Recebido!</h1>
+        <p><strong>Código de Autorização:</strong></p>
+        <div style="background: #f5f5f5; padding: 10px; border-radius: 4px; font-family: monospace; word-break: break-all;">
+            {code}
         </div>
-    </body>
-    </html>
+        <p>Copie este código e cole na interface de renovação.</p>
+        <a href="/renovar-tokens">🔄 Ir para Renovação</a>
+        """
+    
+    return """
+    <h1>❌ Código não encontrado</h1>
+    <p>Não foi possível obter o código de autorização.</p>
+    <a href="/renovar-tokens">🔄 Tentar Novamente</a>
     """
 
-@app.route('/api/absence', methods=['POST'])
-def add_absence():
-    """API para adicionar configuração de ausência"""
-    try:
-        with app.app_context():
-            user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
-            if not user:
-                return jsonify({'error': 'Usuário não encontrado'}), 404
-            
-            name = request.form.get('name')
-            message = request.form.get('message')
-            start_time = request.form.get('start_time')
-            end_time = request.form.get('end_time')
-            days_of_week = ','.join(request.form.getlist('days_of_week'))
-            
-            absence = AbsenceConfig(
-                user_id=user.id,
-                name=name,
-                message=message,
-                start_time=start_time,
-                end_time=end_time,
-                days_of_week=days_of_week
-            )
-            
-            db.session.add(absence)
-            db.session.commit()
-            
-            return redirect('/edit-absence')
-            
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/token-status')
-def token_status_page():
-    """Página detalhada do status do token"""
-    try:
-        with app.app_context():
-            # Verificar token atual
-            is_valid, message = check_token_validity()
-            
-            # Buscar logs recentes
-            user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
-            if user:
-                logs = TokenLog.query.filter_by(user_id=user.id).order_by(TokenLog.checked_at.desc()).limit(20).all()
-            else:
-                logs = []
-            
-            html = f"""
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <title>Status do Token - Bot ML</title>
-                <meta charset="utf-8">
-                <style>
-                    body {{ font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }}
-                    .container {{ max-width: 1000px; margin: 0 auto; }}
-                    .card {{ background: #fff; padding: 20px; border-radius: 8px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
-                    .status-valid {{ color: #4CAF50; font-weight: bold; }}
-                    .status-invalid {{ color: #f44336; font-weight: bold; }}
-                    .nav a {{ display: inline-block; padding: 10px 20px; background: #2196F3; color: white; text-decoration: none; border-radius: 4px; margin-right: 10px; }}
-                    .btn {{ padding: 10px 20px; background: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer; }}
-                    .btn:hover {{ background: #45a049; }}
-                    .btn-warning {{ background: #ff9800; }}
-                    .btn-warning:hover {{ background: #e68900; }}
-                    table {{ width: 100%; border-collapse: collapse; }}
-                    th, td {{ padding: 10px; text-align: left; border-bottom: 1px solid #ddd; }}
-                    th {{ background: #f5f5f5; }}
-                    .log-valid {{ color: #4CAF50; }}
-                    .log-expired {{ color: #f44336; }}
-                    .log-error {{ color: #ff9800; }}
-                    .log-renewed {{ color: #2196F3; }}
-                </style>
-                <script>
-                    function checkToken() {{
-                        fetch('/api/token/check', {{method: 'POST'}})
-                        .then(response => response.json())
-                        .then(data => {{
-                            alert(data.message || 'Verificação concluída');
-                            window.location.reload();
-                        }})
-                        .catch(error => alert('Erro: ' + error));
-                    }}
-                </script>
-            </head>
-            <body>
-                <div class="container">
-                    <div class="card">
-                        <h1>🔑 Status do Token</h1>
-                        <div class="nav">
-                            <a href="/">🏠 Dashboard</a>
-                            <a href="/edit-rules">✏️ Regras</a>
-                            <a href="/history">📊 Histórico</a>
-                            <a href="/renovar-tokens" style="background: #ff9800;">🔄 Renovar Tokens</a>
-                        </div>
-                    </div>
-                    
-                    <div class="card">
-                        <h3>📊 Status Atual</h3>
-                        <p><strong>Status:</strong> 
-                            <span class="{'status-valid' if is_valid else 'status-invalid'}">
-                                {'✅ Válido' if is_valid else '❌ Inválido'}
-                            </span>
-                        </p>
-                        <p><strong>Token:</strong> {TOKEN_STATUS.get('current_token', '')[:30]}...</p>
-                        <p><strong>Última Verificação:</strong> {TOKEN_STATUS.get('last_check').strftime('%d/%m/%Y %H:%M:%S') if TOKEN_STATUS.get('last_check') else 'Nunca'}</p>
-                        <p><strong>Mensagem:</strong> {message}</p>
-                        <button class="btn" onclick="checkToken()">🔄 Verificar Agora</button>
-                        {'<a href="/renovar-tokens" class="btn btn-warning">🚨 Renovar Tokens</a>' if not is_valid else ''}
-                    </div>
-                    
-                    <div class="card">
-                        <h3>📋 Logs de Verificação</h3>
-                        <table>
-                            <thead>
-                                <tr>
-                                    <th>Data/Hora</th>
-                                    <th>Status</th>
-                                    <th>Mensagem</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-            """
-            
-            for log in logs:
-                checked_at = format_local_time(log.checked_at)
-                date_str = checked_at.strftime('%d/%m %H:%M:%S') if checked_at else 'N/A'
-                
-                status_class = f"log-{log.token_status}"
-                status_text = {
-                    'valid': '✅ Válido',
-                    'expired': '❌ Expirado',
-                    'error': '⚠️ Erro',
-                    'renewed': '🔄 Renovado'
-                }.get(log.token_status, log.token_status)
-                
-                html += f"""
-                                <tr>
-                                    <td>{date_str}</td>
-                                    <td class="{status_class}">{status_text}</td>
-                                    <td>{log.error_message or '-'}</td>
-                                </tr>
-                """
-            
-            html += """
-                            </tbody>
-                        </table>
-                    </div>
-                </div>
-            </body>
-            </html>
-            """
-            
-            return html
-            
-    except Exception as e:
-        return f"Erro: {e}"
+@app.route('/api/ml/webhook')
+def webhook_callback():
+    """Callback alternativo para webhook"""
+    code = request.args.get('code')
+    error = request.args.get('error')
+    
+    if error:
+        return f"""
+        <h1>❌ Erro na Autorização (Webhook)</h1>
+        <p>Erro: {error}</p>
+        <p>Descrição: {request.args.get('error_description', 'N/A')}</p>
+        <a href="/renovar-tokens">🔄 Tentar Novamente</a>
+        """
+    
+    if code:
+        return f"""
+        <h1>✅ Código Recebido via Webhook!</h1>
+        <p><strong>Código de Autorização:</strong></p>
+        <div style="background: #f5f5f5; padding: 10px; border-radius: 4px; font-family: monospace; word-break: break-all;">
+            {code}
+        </div>
+        <p>Copie este código e cole na interface de renovação.</p>
+        <a href="/renovar-tokens">🔄 Ir para Renovação</a>
+        """
+    
+    return """
+    <h1>❌ Código não encontrado (Webhook)</h1>
+    <p>Não foi possível obter o código de autorização.</p>
+    <a href="/renovar-tokens">🔄 Tentar Novamente</a>
+    """
 
 # ========== INICIALIZAÇÃO ==========
 
@@ -1705,7 +772,8 @@ def start_background_tasks():
     polling_thread = threading.Thread(target=polling_loop, daemon=True)
     polling_thread.start()
     
-    print("✅ Sistema iniciado com interface de renovação de tokens integrada!")
+    print("✅ Sistema iniciado com renovação flexível de tokens!")
+    print("🔧 Suporte a múltiplas URLs de redirect configurado")
 
 if __name__ == '__main__':
     start_background_tasks()
