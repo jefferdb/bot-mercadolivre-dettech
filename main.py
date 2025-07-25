@@ -11,7 +11,7 @@ import requests
 app = Flask(__name__)
 CORS(app)
 
-# Configuração do banco SQLite em memória
+# Configuração do banco SQLite persistente
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:////opt/render/project/src/data/bot_data.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
@@ -68,7 +68,7 @@ class AbsenceConfig(db.Model):
     days_of_week = db.Column(db.String(20))  # 0,1,2,3,4,5,6
     is_active = db.Column(db.Boolean, default=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    
+
 class TokenLog(db.Model):
     __tablename__ = 'token_logs'
     id = db.Column(db.Integer, primary_key=True)
@@ -223,7 +223,8 @@ def is_absence_time():
                     return config.message
     
     return None
-    # Função para renovar token automaticamente
+
+# Função para renovar token automaticamente
 def renew_access_token():
     global ML_ACCESS_TOKEN
     
@@ -244,7 +245,7 @@ def renew_access_token():
         
         headers = {"Content-Type": "application/x-www-form-urlencoded"}
         
-        print(f"🔄 Renovando token para usuário {ML_USER_ID}..." )
+        print(f"🔄 Renovando token para usuário {ML_USER_ID}...")
         
         response = requests.post(url, data=data, headers=headers)
         
@@ -328,11 +329,12 @@ def check_token_expiration():
         print(f"❌ Erro ao verificar expiração do token: {e}")
         return False
 
-
 # Função para encontrar resposta automática
 def find_auto_response(question_text):
     question_lower = question_text.lower()
     
+    # Forçar busca nova do banco
+    db.session.expire_all()
     auto_responses = AutoResponse.query.filter_by(is_active=True).all()
     
     for response in auto_responses:
@@ -346,6 +348,8 @@ def find_auto_response(question_text):
 
 # Função para responder pergunta no ML
 def answer_question_ml(question_id, answer_text):
+    global ML_ACCESS_TOKEN
+    
     url = f"https://api.mercadolibre.com/answers"
     
     headers = {
@@ -371,6 +375,8 @@ def answer_question_ml(question_id, answer_text):
 
 # Função para buscar perguntas não respondidas
 def fetch_unanswered_questions():
+    global ML_ACCESS_TOKEN
+    
     url = f"https://api.mercadolibre.com/my/received_questions/search"
     
     headers = {
@@ -459,6 +465,7 @@ def monitor_questions():
         except Exception as e:
             print(f"❌ Erro no monitoramento: {e}")
             time.sleep(60)
+
 # Função de monitoramento de token
 def monitor_token():
     while True:
@@ -490,9 +497,24 @@ def dashboard():
     # Status do token
     token_status = "Válido" if user.token_expires_at and user.token_expires_at > datetime.utcnow() else "Expirado"
     
+    # Tempo até expiração
+    if user.token_expires_at:
+        time_until_expiry = user.token_expires_at - datetime.utcnow()
+        if time_until_expiry.total_seconds() > 0:
+            hours_left = int(time_until_expiry.total_seconds() / 3600)
+            minutes_left = int((time_until_expiry.total_seconds() % 3600) / 60)
+            token_expires_in = f"{hours_left}h {minutes_left}m"
+        else:
+            token_expires_in = "Expirado"
+    else:
+        token_expires_in = "Desconhecido"
+    
     # Contadores
     active_rules = AutoResponse.query.filter_by(user_id=user.id, is_active=True).count()
     absence_configs = AbsenceConfig.query.filter_by(user_id=user.id, is_active=True).count()
+    
+    # Últimas renovações
+    recent_renewals = TokenLog.query.filter_by(user_id=user.id, action='renewed').order_by(TokenLog.created_at.desc()).limit(3).all()
     
     html = f"""
     <!DOCTYPE html>
@@ -522,13 +544,15 @@ def dashboard():
             .nav-card {{ background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.08); text-align: center; }}
             .nav-card a {{ text-decoration: none; color: #3483fa; font-weight: bold; font-size: 1.1em; }}
             .nav-card:hover {{ transform: translateY(-2px); box-shadow: 0 6px 20px rgba(0,0,0,0.12); }}
+            .renewal-log {{ font-size: 0.9em; margin-top: 10px; }}
+            .renewal-item {{ margin-bottom: 5px; padding: 5px; background: #f8f9fa; border-radius: 4px; }}
         </style>
     </head>
     <body>
         <div class="container">
             <div class="header">
                 <h1>🤖 Bot do Mercado Livre</h1>
-                <p>Sistema Automatizado de Respostas</p>
+                <p>Sistema Automatizado de Respostas com Renovação Automática</p>
             </div>
             
             <div class="stats">
@@ -555,14 +579,20 @@ def dashboard():
                     <h3>✅ Status da Conexão</h3>
                     <p><strong>Status:</strong> Conectado</p>
                     <p><strong>Token:</strong> {token_status}</p>
+                    <p><strong>Expira em:</strong> {token_expires_in}</p>
                     <p><strong>Monitoramento:</strong> Ativo</p>
                     <p><strong>Webhook:</strong> Funcionando</p>
+                    <p><strong>Renovação:</strong> Automática</p>
                 </div>
                 <div class="status-card connected">
                     <h3>📊 Configurações Ativas</h3>
                     <p><strong>Regras Ativas:</strong> {active_rules}</p>
                     <p><strong>Configurações de Ausência:</strong> {absence_configs}</p>
                     <p><strong>Última Verificação:</strong> {datetime.now().strftime('%H:%M:%S')}</p>
+                    <div class="renewal-log">
+                        <strong>Últimas Renovações:</strong>
+                        {''.join([f'<div class="renewal-item">🔄 {r.created_at.strftime("%d/%m %H:%M")} - {r.message}</div>' for r in recent_renewals]) if recent_renewals else '<div class="renewal-item">Nenhuma renovação ainda</div>'}
+                    </div>
                 </div>
             </div>
             
@@ -582,6 +612,11 @@ def dashboard():
                     <p>Mensagens automáticas</p>
                     <a href="/absence">Acessar →</a>
                 </div>
+                <div class="nav-card">
+                    <h3>🔑 Logs de Token</h3>
+                    <p>Histórico de renovações</p>
+                    <a href="/token-logs">Acessar →</a>
+                </div>
             </div>
         </div>
     </body>
@@ -590,7 +625,7 @@ def dashboard():
     return html
 
 @app.route('/rules')
-def rules_page():
+def rules():
     if not _initialized:
         initialize_database()
     
@@ -602,20 +637,23 @@ def rules_page():
     
     rules_html = ""
     for rule in rules:
-        status = "✅ Ativa" if rule.is_active else "❌ Inativa"
+        status_color = "#00a650" if rule.is_active else "#ff3333"
+        status_text = "Ativa" if rule.is_active else "Inativa"
+        
         rules_html += f"""
-        <div class="rule-card">
+        <div class="rule-card" style="border-left: 4px solid {status_color};">
             <div class="rule-header">
-                <h3>Regra #{rule.id}</h3>
-                <div class="rule-actions">
-                    <span class="status {'active' if rule.is_active else 'inactive'}">{status}</span>
-                    <a href="/rules/edit/{rule.id}" class="edit-btn">✏️ Editar</a>
-                    <a href="/rules/toggle/{rule.id}" class="toggle-btn">{'❌ Desativar' if rule.is_active else '✅ Ativar'}</a>
-                </div>
+                <h3>📋 Regra #{rule.id}</h3>
+                <span class="rule-status" style="color: {status_color};">{status_text}</span>
             </div>
             <div class="rule-content">
                 <p><strong>Palavras-chave:</strong> {rule.keywords}</p>
                 <p><strong>Resposta:</strong> {rule.response_text}</p>
+                <p><strong>Criada em:</strong> {rule.created_at.strftime('%d/%m/%Y %H:%M')}</p>
+            </div>
+            <div class="rule-actions">
+                <a href="/rules/edit/{rule.id}" class="btn-edit">✏️ Editar</a>
+                <a href="/rules/toggle/{rule.id}" class="btn-toggle">{'🔴 Desativar' if rule.is_active else '🟢 Ativar'}</a>
             </div>
         </div>
         """
@@ -634,63 +672,39 @@ def rules_page():
             .header {{ background: linear-gradient(135deg, #3483fa, #2968c8); color: white; padding: 30px; border-radius: 12px; margin-bottom: 30px; text-align: center; }}
             .rule-card {{ background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.08); margin-bottom: 20px; }}
             .rule-header {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; }}
-            .rule-actions {{ display: flex; gap: 10px; align-items: center; }}
-            .status.active {{ color: #00a650; font-weight: bold; }}
-            .status.inactive {{ color: #ff3333; font-weight: bold; }}
+            .rule-status {{ font-weight: bold; }}
             .rule-content p {{ margin-bottom: 10px; }}
-            .back-btn, .edit-btn, .toggle-btn, .add-btn {{ display: inline-block; padding: 8px 16px; text-decoration: none; border-radius: 6px; font-size: 0.9em; }}
-            .back-btn {{ background: #3483fa; color: white; margin-bottom: 20px; }}
-            .edit-btn {{ background: #28a745; color: white; }}
-            .toggle-btn {{ background: #ffc107; color: #212529; }}
-            .add-btn {{ background: #17a2b8; color: white; margin-bottom: 20px; }}
-            .actions {{ margin-bottom: 20px; }}
+            .rule-actions {{ margin-top: 15px; }}
+            .btn-edit, .btn-toggle {{ display: inline-block; padding: 8px 16px; margin-right: 10px; text-decoration: none; border-radius: 6px; font-size: 0.9em; }}
+            .btn-edit {{ background: #3483fa; color: white; }}
+            .btn-toggle {{ background: #28a745; color: white; }}
+            .back-btn {{ display: inline-block; background: #3483fa; color: white; padding: 12px 24px; text-decoration: none; border-radius: 8px; margin-bottom: 20px; }}
+            .add-btn {{ display: inline-block; background: #28a745; color: white; padding: 12px 24px; text-decoration: none; border-radius: 8px; margin-bottom: 20px; margin-left: 10px; }}
         </style>
     </head>
     <body>
         <div class="container">
             <a href="/" class="back-btn">← Voltar ao Dashboard</a>
+            <a href="/rules/add" class="add-btn">➕ Adicionar Regra</a>
             
             <div class="header">
-                <h1>📋 Regras de Resposta Automática</h1>
-                <p>Total: {len(rules)} regras configuradas</p>
+                <h1>📋 Regras de Resposta</h1>
+                <p>Gerenciar respostas automáticas do bot</p>
             </div>
             
-            <div class="actions">
-                <a href="/rules/add" class="add-btn">➕ Adicionar Nova Regra</a>
-            </div>
-            
-            {rules_html}
+            {rules_html if rules_html else '<div class="rule-card"><p>Nenhuma regra encontrada.</p></div>'}
         </div>
     </body>
     </html>
     """
     return html
 
-@app.route('/rules/edit/<int:rule_id>', methods=['GET', 'POST'])
+@app.route('/rules/edit/<int:rule_id>')
 def edit_rule(rule_id):
     if not _initialized:
         initialize_database()
     
-    user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
-    if not user:
-        return "❌ Usuário não encontrado", 404
-    
-    rule = AutoResponse.query.filter_by(id=rule_id, user_id=user.id).first()
-    if not rule:
-        return "❌ Regra não encontrada", 404
-    
-    if request.method == 'POST':
-        keywords = request.form.get('keywords', '').strip()
-        response_text = request.form.get('response_text', '').strip()
-        is_active = request.form.get('is_active') == 'on'
-        
-        if keywords and response_text:
-            rule.keywords = keywords
-            rule.response_text = response_text
-            rule.is_active = is_active
-            rule.updated_at = datetime.utcnow()
-            db.session.commit()
-            return redirect('/rules')
+    rule = AutoResponse.query.get_or_404(rule_id)
     
     html = f"""
     <!DOCTYPE html>
@@ -707,15 +721,14 @@ def edit_rule(rule_id):
             .form-card {{ background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.08); }}
             .form-group {{ margin-bottom: 20px; }}
             .form-group label {{ display: block; margin-bottom: 8px; font-weight: bold; color: #333; }}
-            .form-group input, .form-group textarea {{ width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 6px; font-size: 14px; }}
+            .form-group input, .form-group textarea {{ width: 100%; padding: 12px; border: 2px solid #e0e0e0; border-radius: 8px; font-size: 16px; }}
             .form-group textarea {{ height: 120px; resize: vertical; }}
-            .checkbox-group {{ display: flex; align-items: center; gap: 10px; }}
-            .checkbox-group input {{ width: auto; }}
-            .btn-group {{ display: flex; gap: 10px; margin-top: 20px; }}
-            .btn {{ padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: bold; text-align: center; border: none; cursor: pointer; }}
-            .btn-primary {{ background: #3483fa; color: white; }}
-            .btn-secondary {{ background: #6c757d; color: white; }}
-            .back-btn {{ display: inline-block; background: #3483fa; color: white; padding: 12px 24px; text-decoration: none; border-radius: 8px; margin-bottom: 20px; }}
+            .form-group input:focus, .form-group textarea:focus {{ border-color: #3483fa; outline: none; }}
+            .btn-save {{ background: #28a745; color: white; padding: 12px 24px; border: none; border-radius: 8px; font-size: 16px; cursor: pointer; }}
+            .btn-save:hover {{ background: #218838; }}
+            .back-btn {{ display: inline-block; background: #6c757d; color: white; padding: 12px 24px; text-decoration: none; border-radius: 8px; margin-bottom: 20px; }}
+            .checkbox-group {{ display: flex; align-items: center; }}
+            .checkbox-group input {{ width: auto; margin-right: 10px; }}
         </style>
     </head>
     <body>
@@ -724,19 +737,19 @@ def edit_rule(rule_id):
             
             <div class="header">
                 <h1>✏️ Editar Regra #{rule.id}</h1>
+                <p>Modificar resposta automática</p>
             </div>
             
             <div class="form-card">
-                <form method="POST">
+                <form method="POST" action="/rules/save/{rule.id}">
                     <div class="form-group">
                         <label for="keywords">Palavras-chave (separadas por vírgula):</label>
                         <input type="text" id="keywords" name="keywords" value="{rule.keywords}" required>
-                        <small>Exemplo: preço, valor, quanto custa</small>
                     </div>
                     
                     <div class="form-group">
-                        <label for="response_text">Resposta automática:</label>
-                        <textarea id="response_text" name="response_text" required>{rule.response_text}</textarea>
+                        <label for="response">Resposta automática:</label>
+                        <textarea id="response" name="response" required>{rule.response_text}</textarea>
                     </div>
                     
                     <div class="form-group">
@@ -746,10 +759,7 @@ def edit_rule(rule_id):
                         </div>
                     </div>
                     
-                    <div class="btn-group">
-                        <button type="submit" class="btn btn-primary">💾 Salvar Alterações</button>
-                        <a href="/rules" class="btn btn-secondary">❌ Cancelar</a>
-                    </div>
+                    <button type="submit" class="btn-save">💾 Salvar Alterações</button>
                 </form>
             </div>
         </div>
@@ -758,30 +768,26 @@ def edit_rule(rule_id):
     """
     return html
 
-@app.route('/rules/add', methods=['GET', 'POST'])
-def add_rule():
+@app.route('/rules/save/<int:rule_id>', methods=['POST'])
+def save_rule(rule_id):
     if not _initialized:
         initialize_database()
     
-    user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
-    if not user:
-        return "❌ Usuário não encontrado", 404
+    rule = AutoResponse.query.get_or_404(rule_id)
     
-    if request.method == 'POST':
-        keywords = request.form.get('keywords', '').strip()
-        response_text = request.form.get('response_text', '').strip()
-        is_active = request.form.get('is_active') == 'on'
-        
-        if keywords and response_text:
-            new_rule = AutoResponse(
-                user_id=user.id,
-                keywords=keywords,
-                response_text=response_text,
-                is_active=is_active
-            )
-            db.session.add(new_rule)
-            db.session.commit()
-            return redirect('/rules')
+    rule.keywords = request.form.get('keywords', '')
+    rule.response_text = request.form.get('response', '')
+    rule.is_active = 'is_active' in request.form
+    rule.updated_at = datetime.utcnow()
+    
+    db.session.commit()
+    
+    return redirect(url_for('rules'))
+
+@app.route('/rules/add')
+def add_rule():
+    if not _initialized:
+        initialize_database()
     
     html = """
     <!DOCTYPE html>
@@ -798,15 +804,14 @@ def add_rule():
             .form-card { background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.08); }
             .form-group { margin-bottom: 20px; }
             .form-group label { display: block; margin-bottom: 8px; font-weight: bold; color: #333; }
-            .form-group input, .form-group textarea { width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 6px; font-size: 14px; }
+            .form-group input, .form-group textarea { width: 100%; padding: 12px; border: 2px solid #e0e0e0; border-radius: 8px; font-size: 16px; }
             .form-group textarea { height: 120px; resize: vertical; }
-            .checkbox-group { display: flex; align-items: center; gap: 10px; }
-            .checkbox-group input { width: auto; }
-            .btn-group { display: flex; gap: 10px; margin-top: 20px; }
-            .btn { padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: bold; text-align: center; border: none; cursor: pointer; }
-            .btn-primary { background: #3483fa; color: white; }
-            .btn-secondary { background: #6c757d; color: white; }
-            .back-btn { display: inline-block; background: #3483fa; color: white; padding: 12px 24px; text-decoration: none; border-radius: 8px; margin-bottom: 20px; }
+            .form-group input:focus, .form-group textarea:focus { border-color: #3483fa; outline: none; }
+            .btn-save { background: #28a745; color: white; padding: 12px 24px; border: none; border-radius: 8px; font-size: 16px; cursor: pointer; }
+            .btn-save:hover { background: #218838; }
+            .back-btn { display: inline-block; background: #6c757d; color: white; padding: 12px 24px; text-decoration: none; border-radius: 8px; margin-bottom: 20px; }
+            .checkbox-group { display: flex; align-items: center; }
+            .checkbox-group input { width: auto; margin-right: 10px; }
         </style>
     </head>
     <body>
@@ -815,19 +820,19 @@ def add_rule():
             
             <div class="header">
                 <h1>➕ Adicionar Nova Regra</h1>
+                <p>Criar nova resposta automática</p>
             </div>
             
             <div class="form-card">
-                <form method="POST">
+                <form method="POST" action="/rules/create">
                     <div class="form-group">
                         <label for="keywords">Palavras-chave (separadas por vírgula):</label>
-                        <input type="text" id="keywords" name="keywords" required>
-                        <small>Exemplo: preço, valor, quanto custa</small>
+                        <input type="text" id="keywords" name="keywords" placeholder="Ex: preço, valor, quanto custa" required>
                     </div>
                     
                     <div class="form-group">
-                        <label for="response_text">Resposta automática:</label>
-                        <textarea id="response_text" name="response_text" required></textarea>
+                        <label for="response">Resposta automática:</label>
+                        <textarea id="response" name="response" placeholder="Digite a resposta que será enviada automaticamente..." required></textarea>
                     </div>
                     
                     <div class="form-group">
@@ -837,10 +842,7 @@ def add_rule():
                         </div>
                     </div>
                     
-                    <div class="btn-group">
-                        <button type="submit" class="btn btn-primary">💾 Salvar Regra</button>
-                        <a href="/rules" class="btn btn-secondary">❌ Cancelar</a>
-                    </div>
+                    <button type="submit" class="btn-save">💾 Criar Regra</button>
                 </form>
             </div>
         </div>
@@ -849,8 +851,8 @@ def add_rule():
     """
     return html
 
-@app.route('/rules/toggle/<int:rule_id>')
-def toggle_rule(rule_id):
+@app.route('/rules/create', methods=['POST'])
+def create_rule():
     if not _initialized:
         initialize_database()
     
@@ -858,16 +860,33 @@ def toggle_rule(rule_id):
     if not user:
         return "❌ Usuário não encontrado", 404
     
-    rule = AutoResponse.query.filter_by(id=rule_id, user_id=user.id).first()
-    if rule:
-        rule.is_active = not rule.is_active
-        rule.updated_at = datetime.utcnow()
-        db.session.commit()
+    rule = AutoResponse(
+        user_id=user.id,
+        keywords=request.form.get('keywords', ''),
+        response_text=request.form.get('response', ''),
+        is_active='is_active' in request.form
+    )
     
-    return redirect('/rules')
+    db.session.add(rule)
+    db.session.commit()
+    
+    return redirect(url_for('rules'))
+
+@app.route('/rules/toggle/<int:rule_id>')
+def toggle_rule(rule_id):
+    if not _initialized:
+        initialize_database()
+    
+    rule = AutoResponse.query.get_or_404(rule_id)
+    rule.is_active = not rule.is_active
+    rule.updated_at = datetime.utcnow()
+    
+    db.session.commit()
+    
+    return redirect(url_for('rules'))
 
 @app.route('/questions')
-def questions_page():
+def questions():
     if not _initialized:
         initialize_database()
     
@@ -879,19 +898,22 @@ def questions_page():
     
     questions_html = ""
     for q in questions:
-        status = "✅ Respondida" if q.is_answered else "⏳ Pendente"
-        auto_status = " (Automática)" if q.answered_automatically else ""
+        status_color = "#00a650" if q.is_answered else "#ff9500"
+        status_text = "Respondida" if q.is_answered else "Pendente"
+        auto_text = " (Automática)" if q.answered_automatically else ""
         
         questions_html += f"""
-        <div class="question-card">
+        <div class="question-card" style="border-left: 4px solid {status_color};">
             <div class="question-header">
-                <h3>Pergunta #{q.ml_question_id}</h3>
-                <span class="status">{status}{auto_status}</span>
+                <h3>❓ Pergunta #{q.id}</h3>
+                <span class="question-status" style="color: {status_color};">{status_text}{auto_text}</span>
             </div>
             <div class="question-content">
                 <p><strong>Pergunta:</strong> {q.question_text}</p>
                 {f'<p><strong>Resposta:</strong> {q.response_text}</p>' if q.response_text else ''}
-                <p><strong>Data:</strong> {q.created_at.strftime('%d/%m/%Y %H:%M')}</p>
+                <p><strong>Item ID:</strong> {q.item_id}</p>
+                <p><strong>Recebida em:</strong> {q.created_at.strftime('%d/%m/%Y %H:%M:%S')}</p>
+                {f'<p><strong>Respondida em:</strong> {q.answered_at.strftime("%d/%m/%Y %H:%M:%S")}</p>' if q.answered_at else ''}
             </div>
         </div>
         """
@@ -903,6 +925,7 @@ def questions_page():
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Perguntas Recebidas - Bot ML</title>
+        <meta http-equiv="refresh" content="60">
         <style>
             * {{ margin: 0; padding: 0; box-sizing: border-box; }}
             body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #f8f9fa; }}
@@ -910,7 +933,7 @@ def questions_page():
             .header {{ background: linear-gradient(135deg, #3483fa, #2968c8); color: white; padding: 30px; border-radius: 12px; margin-bottom: 30px; text-align: center; }}
             .question-card {{ background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.08); margin-bottom: 20px; }}
             .question-header {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; }}
-            .status {{ font-weight: bold; color: #00a650; }}
+            .question-status {{ font-weight: bold; }}
             .question-content p {{ margin-bottom: 10px; }}
             .back-btn {{ display: inline-block; background: #3483fa; color: white; padding: 12px 24px; text-decoration: none; border-radius: 8px; margin-bottom: 20px; }}
             .sync-btn {{ display: inline-block; background: #28a745; color: white; padding: 12px 24px; text-decoration: none; border-radius: 8px; margin-bottom: 20px; margin-left: 10px; }}
@@ -919,11 +942,11 @@ def questions_page():
     <body>
         <div class="container">
             <a href="/" class="back-btn">← Voltar ao Dashboard</a>
-            <a href="/questions/sync" class="sync-btn">🔄 Sincronizar Perguntas</a>
+            <a href="/questions/sync" class="sync-btn">🔄 Sincronizar</a>
             
             <div class="header">
                 <h1>❓ Perguntas Recebidas</h1>
-                <p>Últimas {len(questions)} perguntas</p>
+                <p>Histórico de perguntas e respostas</p>
             </div>
             
             {questions_html if questions_html else '<div class="question-card"><p>Nenhuma pergunta recebida ainda. O bot está monitorando a cada 60 segundos.</p></div>'}
@@ -944,7 +967,7 @@ def sync_questions():
     return redirect('/questions')
 
 @app.route('/absence')
-def absence_page():
+def absence():
     if not _initialized:
         initialize_database()
     
@@ -956,27 +979,32 @@ def absence_page():
     
     configs_html = ""
     for config in configs:
-        status = "✅ Ativa" if config.is_active else "❌ Inativa"
+        status_color = "#00a650" if config.is_active else "#ff3333"
+        status_text = "Ativa" if config.is_active else "Inativa"
+        
+        # Converter dias da semana
         days_map = {
-            "0": "Segunda", "1": "Terça", "2": "Quarta", 
-            "3": "Quinta", "4": "Sexta", "5": "Sábado", "6": "Domingo"
+            '0': 'Seg', '1': 'Ter', '2': 'Qua', 
+            '3': 'Qui', '4': 'Sex', '5': 'Sáb', '6': 'Dom'
         }
-        days = [days_map.get(d, d) for d in config.days_of_week.split(',')]
+        days_list = [days_map.get(d, d) for d in config.days_of_week.split(',')]
+        days_text = ', '.join(days_list)
         
         configs_html += f"""
-        <div class="config-card">
+        <div class="config-card" style="border-left: 4px solid {status_color};">
             <div class="config-header">
-                <h3>{config.name}</h3>
-                <div class="config-actions">
-                    <span class="status {'active' if config.is_active else 'inactive'}">{status}</span>
-                    <a href="/absence/edit/{config.id}" class="edit-btn">✏️ Editar</a>
-                    <a href="/absence/toggle/{config.id}" class="toggle-btn">{'❌ Desativar' if config.is_active else '✅ Ativar'}</a>
-                </div>
+                <h3>🌙 {config.name}</h3>
+                <span class="config-status" style="color: {status_color};">{status_text}</span>
             </div>
             <div class="config-content">
                 <p><strong>Mensagem:</strong> {config.message}</p>
                 <p><strong>Horário:</strong> {config.start_time} às {config.end_time}</p>
-                <p><strong>Dias:</strong> {', '.join(days)}</p>
+                <p><strong>Dias:</strong> {days_text}</p>
+                <p><strong>Criada em:</strong> {config.created_at.strftime('%d/%m/%Y %H:%M')}</p>
+            </div>
+            <div class="config-actions">
+                <a href="/absence/edit/{config.id}" class="btn-edit">✏️ Editar</a>
+                <a href="/absence/toggle/{config.id}" class="btn-toggle">{'🔴 Desativar' if config.is_active else '🟢 Ativar'}</a>
             </div>
         </div>
         """
@@ -995,70 +1023,61 @@ def absence_page():
             .header {{ background: linear-gradient(135deg, #3483fa, #2968c8); color: white; padding: 30px; border-radius: 12px; margin-bottom: 30px; text-align: center; }}
             .config-card {{ background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.08); margin-bottom: 20px; }}
             .config-header {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; }}
-            .config-actions {{ display: flex; gap: 10px; align-items: center; }}
-            .status.active {{ color: #00a650; font-weight: bold; }}
-            .status.inactive {{ color: #ff3333; font-weight: bold; }}
+            .config-status {{ font-weight: bold; }}
             .config-content p {{ margin-bottom: 10px; }}
-            .back-btn, .edit-btn, .toggle-btn, .add-btn {{ display: inline-block; padding: 8px 16px; text-decoration: none; border-radius: 6px; font-size: 0.9em; }}
-            .back-btn {{ background: #3483fa; color: white; margin-bottom: 20px; }}
-            .edit-btn {{ background: #28a745; color: white; }}
-            .toggle-btn {{ background: #ffc107; color: #212529; }}
-            .add-btn {{ background: #17a2b8; color: white; margin-bottom: 20px; }}
-            .actions {{ margin-bottom: 20px; }}
+            .config-actions {{ margin-top: 15px; }}
+            .btn-edit, .btn-toggle {{ display: inline-block; padding: 8px 16px; margin-right: 10px; text-decoration: none; border-radius: 6px; font-size: 0.9em; }}
+            .btn-edit {{ background: #3483fa; color: white; }}
+            .btn-toggle {{ background: #28a745; color: white; }}
+            .back-btn {{ display: inline-block; background: #3483fa; color: white; padding: 12px 24px; text-decoration: none; border-radius: 8px; margin-bottom: 20px; }}
+            .add-btn {{ display: inline-block; background: #28a745; color: white; padding: 12px 24px; text-decoration: none; border-radius: 8px; margin-bottom: 20px; margin-left: 10px; }}
         </style>
     </head>
     <body>
         <div class="container">
             <a href="/" class="back-btn">← Voltar ao Dashboard</a>
+            <a href="/absence/add" class="add-btn">➕ Adicionar Configuração</a>
             
             <div class="header">
                 <h1>🌙 Configurações de Ausência</h1>
-                <p>Total: {len(configs)} configurações</p>
+                <p>Gerenciar mensagens automáticas por horário</p>
             </div>
             
-            <div class="actions">
-                <a href="/absence/add" class="add-btn">➕ Adicionar Nova Configuração</a>
-            </div>
-            
-            {configs_html}
+            {configs_html if configs_html else '<div class="config-card"><p>Nenhuma configuração encontrada.</p></div>'}
         </div>
     </body>
     </html>
     """
     return html
 
-@app.route('/absence/edit/<int:config_id>', methods=['GET', 'POST'])
+@app.route('/absence/edit/<int:config_id>')
 def edit_absence(config_id):
     if not _initialized:
         initialize_database()
     
-    user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
-    if not user:
-        return "❌ Usuário não encontrado", 404
+    config = AbsenceConfig.query.get_or_404(config_id)
     
-    config = AbsenceConfig.query.filter_by(id=config_id, user_id=user.id).first()
-    if not config:
-        return "❌ Configuração não encontrada", 404
+    # Checkboxes para dias da semana
+    days_selected = config.days_of_week.split(',')
+    days_checkboxes = ""
+    days_options = [
+        ('0', 'Segunda-feira'),
+        ('1', 'Terça-feira'),
+        ('2', 'Quarta-feira'),
+        ('3', 'Quinta-feira'),
+        ('4', 'Sexta-feira'),
+        ('5', 'Sábado'),
+        ('6', 'Domingo')
+    ]
     
-    if request.method == 'POST':
-        name = request.form.get('name', '').strip()
-        message = request.form.get('message', '').strip()
-        start_time = request.form.get('start_time', '').strip()
-        end_time = request.form.get('end_time', '').strip()
-        days_of_week = ','.join(request.form.getlist('days_of_week'))
-        is_active = request.form.get('is_active') == 'on'
-        
-        if name and message and start_time and end_time and days_of_week:
-            config.name = name
-            config.message = message
-            config.start_time = start_time
-            config.end_time = end_time
-            config.days_of_week = days_of_week
-            config.is_active = is_active
-            db.session.commit()
-            return redirect('/absence')
-    
-    selected_days = config.days_of_week.split(',')
+    for value, label in days_options:
+        checked = 'checked' if value in days_selected else ''
+        days_checkboxes += f"""
+        <div class="checkbox-item">
+            <input type="checkbox" id="day_{value}" name="days" value="{value}" {checked}>
+            <label for="day_{value}">{label}</label>
+        </div>
+        """
     
     html = f"""
     <!DOCTYPE html>
@@ -1075,16 +1094,18 @@ def edit_absence(config_id):
             .form-card {{ background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.08); }}
             .form-group {{ margin-bottom: 20px; }}
             .form-group label {{ display: block; margin-bottom: 8px; font-weight: bold; color: #333; }}
-            .form-group input, .form-group textarea {{ width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 6px; font-size: 14px; }}
+            .form-group input, .form-group textarea {{ width: 100%; padding: 12px; border: 2px solid #e0e0e0; border-radius: 8px; font-size: 16px; }}
             .form-group textarea {{ height: 120px; resize: vertical; }}
-            .checkbox-group {{ display: flex; align-items: center; gap: 10px; }}
-            .checkbox-group input {{ width: auto; }}
-            .days-group {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; }}
-            .btn-group {{ display: flex; gap: 10px; margin-top: 20px; }}
-            .btn {{ padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: bold; text-align: center; border: none; cursor: pointer; }}
-            .btn-primary {{ background: #3483fa; color: white; }}
-            .btn-secondary {{ background: #6c757d; color: white; }}
-            .back-btn {{ display: inline-block; background: #3483fa; color: white; padding: 12px 24px; text-decoration: none; border-radius: 8px; margin-bottom: 20px; }}
+            .form-group input:focus, .form-group textarea:focus {{ border-color: #3483fa; outline: none; }}
+            .btn-save {{ background: #28a745; color: white; padding: 12px 24px; border: none; border-radius: 8px; font-size: 16px; cursor: pointer; }}
+            .btn-save:hover {{ background: #218838; }}
+            .back-btn {{ display: inline-block; background: #6c757d; color: white; padding: 12px 24px; text-decoration: none; border-radius: 8px; margin-bottom: 20px; }}
+            .checkbox-group {{ display: flex; align-items: center; }}
+            .checkbox-group input {{ width: auto; margin-right: 10px; }}
+            .checkbox-item {{ margin-bottom: 10px; }}
+            .checkbox-item input {{ width: auto; margin-right: 10px; }}
+            .time-group {{ display: flex; gap: 15px; }}
+            .time-group .form-group {{ flex: 1; }}
         </style>
     </head>
     <body>
@@ -1092,11 +1113,12 @@ def edit_absence(config_id):
             <a href="/absence" class="back-btn">← Voltar às Configurações</a>
             
             <div class="header">
-                <h1>✏️ Editar Configuração de Ausência</h1>
+                <h1>✏️ Editar Configuração</h1>
+                <p>Modificar mensagem de ausência</p>
             </div>
             
             <div class="form-card">
-                <form method="POST">
+                <form method="POST" action="/absence/save/{config.id}">
                     <div class="form-group">
                         <label for="name">Nome da configuração:</label>
                         <input type="text" id="name" name="name" value="{config.name}" required>
@@ -1107,48 +1129,21 @@ def edit_absence(config_id):
                         <textarea id="message" name="message" required>{config.message}</textarea>
                     </div>
                     
-                    <div class="form-group">
-                        <label for="start_time">Horário de início:</label>
-                        <input type="time" id="start_time" name="start_time" value="{config.start_time}" required>
-                    </div>
-                    
-                    <div class="form-group">
-                        <label for="end_time">Horário de fim:</label>
-                        <input type="time" id="end_time" name="end_time" value="{config.end_time}" required>
+                    <div class="time-group">
+                        <div class="form-group">
+                            <label for="start_time">Hora de início:</label>
+                            <input type="time" id="start_time" name="start_time" value="{config.start_time}" required>
+                        </div>
+                        
+                        <div class="form-group">
+                            <label for="end_time">Hora de fim:</label>
+                            <input type="time" id="end_time" name="end_time" value="{config.end_time}" required>
+                        </div>
                     </div>
                     
                     <div class="form-group">
                         <label>Dias da semana:</label>
-                        <div class="days-group">
-                            <div class="checkbox-group">
-                                <input type="checkbox" id="day_0" name="days_of_week" value="0" {'checked' if '0' in selected_days else ''}>
-                                <label for="day_0">Segunda</label>
-                            </div>
-                            <div class="checkbox-group">
-                                <input type="checkbox" id="day_1" name="days_of_week" value="1" {'checked' if '1' in selected_days else ''}>
-                                <label for="day_1">Terça</label>
-                            </div>
-                            <div class="checkbox-group">
-                                <input type="checkbox" id="day_2" name="days_of_week" value="2" {'checked' if '2' in selected_days else ''}>
-                                <label for="day_2">Quarta</label>
-                            </div>
-                            <div class="checkbox-group">
-                                <input type="checkbox" id="day_3" name="days_of_week" value="3" {'checked' if '3' in selected_days else ''}>
-                                <label for="day_3">Quinta</label>
-                            </div>
-                            <div class="checkbox-group">
-                                <input type="checkbox" id="day_4" name="days_of_week" value="4" {'checked' if '4' in selected_days else ''}>
-                                <label for="day_4">Sexta</label>
-                            </div>
-                            <div class="checkbox-group">
-                                <input type="checkbox" id="day_5" name="days_of_week" value="5" {'checked' if '5' in selected_days else ''}>
-                                <label for="day_5">Sábado</label>
-                            </div>
-                            <div class="checkbox-group">
-                                <input type="checkbox" id="day_6" name="days_of_week" value="6" {'checked' if '6' in selected_days else ''}>
-                                <label for="day_6">Domingo</label>
-                            </div>
-                        </div>
+                        {days_checkboxes}
                     </div>
                     
                     <div class="form-group">
@@ -1158,10 +1153,7 @@ def edit_absence(config_id):
                         </div>
                     </div>
                     
-                    <div class="btn-group">
-                        <button type="submit" class="btn btn-primary">💾 Salvar Alterações</button>
-                        <a href="/absence" class="btn btn-secondary">❌ Cancelar</a>
-                    </div>
+                    <button type="submit" class="btn-save">💾 Salvar Alterações</button>
                 </form>
             </div>
         </div>
@@ -1170,38 +1162,50 @@ def edit_absence(config_id):
     """
     return html
 
-@app.route('/absence/add', methods=['GET', 'POST'])
+@app.route('/absence/save/<int:config_id>', methods=['POST'])
+def save_absence(config_id):
+    if not _initialized:
+        initialize_database()
+    
+    config = AbsenceConfig.query.get_or_404(config_id)
+    
+    config.name = request.form.get('name', '')
+    config.message = request.form.get('message', '')
+    config.start_time = request.form.get('start_time', '')
+    config.end_time = request.form.get('end_time', '')
+    config.days_of_week = ','.join(request.form.getlist('days'))
+    config.is_active = 'is_active' in request.form
+    
+    db.session.commit()
+    
+    return redirect(url_for('absence'))
+
+@app.route('/absence/add')
 def add_absence():
     if not _initialized:
         initialize_database()
     
-    user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
-    if not user:
-        return "❌ Usuário não encontrado", 404
+    # Checkboxes para dias da semana
+    days_checkboxes = ""
+    days_options = [
+        ('0', 'Segunda-feira'),
+        ('1', 'Terça-feira'),
+        ('2', 'Quarta-feira'),
+        ('3', 'Quinta-feira'),
+        ('4', 'Sexta-feira'),
+        ('5', 'Sábado'),
+        ('6', 'Domingo')
+    ]
     
-    if request.method == 'POST':
-        name = request.form.get('name', '').strip()
-        message = request.form.get('message', '').strip()
-        start_time = request.form.get('start_time', '').strip()
-        end_time = request.form.get('end_time', '').strip()
-        days_of_week = ','.join(request.form.getlist('days_of_week'))
-        is_active = request.form.get('is_active') == 'on'
-        
-        if name and message and start_time and end_time and days_of_week:
-            new_config = AbsenceConfig(
-                user_id=user.id,
-                name=name,
-                message=message,
-                start_time=start_time,
-                end_time=end_time,
-                days_of_week=days_of_week,
-                is_active=is_active
-            )
-            db.session.add(new_config)
-            db.session.commit()
-            return redirect('/absence')
+    for value, label in days_options:
+        days_checkboxes += f"""
+        <div class="checkbox-item">
+            <input type="checkbox" id="day_{value}" name="days" value="{value}">
+            <label for="day_{value}">{label}</label>
+        </div>
+        """
     
-    html = """
+    html = f"""
     <!DOCTYPE html>
     <html lang="pt-BR">
     <head>
@@ -1209,23 +1213,25 @@ def add_absence():
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Adicionar Ausência - Bot ML</title>
         <style>
-            * { margin: 0; padding: 0; box-sizing: border-box; }
-            body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #f8f9fa; }
-            .container { max-width: 800px; margin: 0 auto; padding: 20px; }
-            .header { background: linear-gradient(135deg, #3483fa, #2968c8); color: white; padding: 30px; border-radius: 12px; margin-bottom: 30px; text-align: center; }
-            .form-card { background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.08); }
-            .form-group { margin-bottom: 20px; }
-            .form-group label { display: block; margin-bottom: 8px; font-weight: bold; color: #333; }
-            .form-group input, .form-group textarea { width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 6px; font-size: 14px; }
-            .form-group textarea { height: 120px; resize: vertical; }
-            .checkbox-group { display: flex; align-items: center; gap: 10px; }
-            .checkbox-group input { width: auto; }
-            .days-group { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; }
-            .btn-group { display: flex; gap: 10px; margin-top: 20px; }
-            .btn { padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: bold; text-align: center; border: none; cursor: pointer; }
-            .btn-primary { background: #3483fa; color: white; }
-            .btn-secondary { background: #6c757d; color: white; }
-            .back-btn { display: inline-block; background: #3483fa; color: white; padding: 12px 24px; text-decoration: none; border-radius: 8px; margin-bottom: 20px; }
+            * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+            body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #f8f9fa; }}
+            .container {{ max-width: 800px; margin: 0 auto; padding: 20px; }}
+            .header {{ background: linear-gradient(135deg, #3483fa, #2968c8); color: white; padding: 30px; border-radius: 12px; margin-bottom: 30px; text-align: center; }}
+            .form-card {{ background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.08); }}
+            .form-group {{ margin-bottom: 20px; }}
+            .form-group label {{ display: block; margin-bottom: 8px; font-weight: bold; color: #333; }}
+            .form-group input, .form-group textarea {{ width: 100%; padding: 12px; border: 2px solid #e0e0e0; border-radius: 8px; font-size: 16px; }}
+            .form-group textarea {{ height: 120px; resize: vertical; }}
+            .form-group input:focus, .form-group textarea:focus {{ border-color: #3483fa; outline: none; }}
+            .btn-save {{ background: #28a745; color: white; padding: 12px 24px; border: none; border-radius: 8px; font-size: 16px; cursor: pointer; }}
+            .btn-save:hover {{ background: #218838; }}
+            .back-btn {{ display: inline-block; background: #6c757d; color: white; padding: 12px 24px; text-decoration: none; border-radius: 8px; margin-bottom: 20px; }}
+            .checkbox-group {{ display: flex; align-items: center; }}
+            .checkbox-group input {{ width: auto; margin-right: 10px; }}
+            .checkbox-item {{ margin-bottom: 10px; }}
+            .checkbox-item input {{ width: auto; margin-right: 10px; }}
+            .time-group {{ display: flex; gap: 15px; }}
+            .time-group .form-group {{ flex: 1; }}
         </style>
     </head>
     <body>
@@ -1233,63 +1239,37 @@ def add_absence():
             <a href="/absence" class="back-btn">← Voltar às Configurações</a>
             
             <div class="header">
-                <h1>➕ Adicionar Configuração de Ausência</h1>
+                <h1>➕ Adicionar Configuração</h1>
+                <p>Criar nova mensagem de ausência</p>
             </div>
             
             <div class="form-card">
-                <form method="POST">
+                <form method="POST" action="/absence/create">
                     <div class="form-group">
                         <label for="name">Nome da configuração:</label>
-                        <input type="text" id="name" name="name" required>
+                        <input type="text" id="name" name="name" placeholder="Ex: Horário de Almoço" required>
                     </div>
                     
                     <div class="form-group">
                         <label for="message">Mensagem de ausência:</label>
-                        <textarea id="message" name="message" required></textarea>
+                        <textarea id="message" name="message" placeholder="Digite a mensagem que será enviada durante este período..." required></textarea>
                     </div>
                     
-                    <div class="form-group">
-                        <label for="start_time">Horário de início:</label>
-                        <input type="time" id="start_time" name="start_time" required>
-                    </div>
-                    
-                    <div class="form-group">
-                        <label for="end_time">Horário de fim:</label>
-                        <input type="time" id="end_time" name="end_time" required>
+                    <div class="time-group">
+                        <div class="form-group">
+                            <label for="start_time">Hora de início:</label>
+                            <input type="time" id="start_time" name="start_time" required>
+                        </div>
+                        
+                        <div class="form-group">
+                            <label for="end_time">Hora de fim:</label>
+                            <input type="time" id="end_time" name="end_time" required>
+                        </div>
                     </div>
                     
                     <div class="form-group">
                         <label>Dias da semana:</label>
-                        <div class="days-group">
-                            <div class="checkbox-group">
-                                <input type="checkbox" id="day_0" name="days_of_week" value="0">
-                                <label for="day_0">Segunda</label>
-                            </div>
-                            <div class="checkbox-group">
-                                <input type="checkbox" id="day_1" name="days_of_week" value="1">
-                                <label for="day_1">Terça</label>
-                            </div>
-                            <div class="checkbox-group">
-                                <input type="checkbox" id="day_2" name="days_of_week" value="2">
-                                <label for="day_2">Quarta</label>
-                            </div>
-                            <div class="checkbox-group">
-                                <input type="checkbox" id="day_3" name="days_of_week" value="3">
-                                <label for="day_3">Quinta</label>
-                            </div>
-                            <div class="checkbox-group">
-                                <input type="checkbox" id="day_4" name="days_of_week" value="4">
-                                <label for="day_4">Sexta</label>
-                            </div>
-                            <div class="checkbox-group">
-                                <input type="checkbox" id="day_5" name="days_of_week" value="5">
-                                <label for="day_5">Sábado</label>
-                            </div>
-                            <div class="checkbox-group">
-                                <input type="checkbox" id="day_6" name="days_of_week" value="6">
-                                <label for="day_6">Domingo</label>
-                            </div>
-                        </div>
+                        {days_checkboxes}
                     </div>
                     
                     <div class="form-group">
@@ -1299,10 +1279,7 @@ def add_absence():
                         </div>
                     </div>
                     
-                    <div class="btn-group">
-                        <button type="submit" class="btn btn-primary">💾 Salvar Configuração</button>
-                        <a href="/absence" class="btn btn-secondary">❌ Cancelar</a>
-                    </div>
+                    <button type="submit" class="btn-save">💾 Criar Configuração</button>
                 </form>
             </div>
         </div>
@@ -1311,8 +1288,8 @@ def add_absence():
     """
     return html
 
-@app.route('/absence/toggle/<int:config_id>')
-def toggle_absence(config_id):
+@app.route('/absence/create', methods=['POST'])
+def create_absence():
     if not _initialized:
         initialize_database()
     
@@ -1320,33 +1297,136 @@ def toggle_absence(config_id):
     if not user:
         return "❌ Usuário não encontrado", 404
     
-    config = AbsenceConfig.query.filter_by(id=config_id, user_id=user.id).first()
-    if config:
-        config.is_active = not config.is_active
-        db.session.commit()
+    config = AbsenceConfig(
+        user_id=user.id,
+        name=request.form.get('name', ''),
+        message=request.form.get('message', ''),
+        start_time=request.form.get('start_time', ''),
+        end_time=request.form.get('end_time', ''),
+        days_of_week=','.join(request.form.getlist('days')),
+        is_active='is_active' in request.form
+    )
     
-    return redirect('/absence')
+    db.session.add(config)
+    db.session.commit()
+    
+    return redirect(url_for('absence'))
 
-# Webhook para receber notificações do Mercado Livre
-@app.route('/api/ml/webhook', methods=['GET', 'POST'])
-def webhook_ml():
-    if request.method == 'GET':
-        return jsonify({"message": "webhook funcionando!", "status": "webhook_active"})
+@app.route('/absence/toggle/<int:config_id>')
+def toggle_absence(config_id):
+    if not _initialized:
+        initialize_database()
     
+    config = AbsenceConfig.query.get_or_404(config_id)
+    config.is_active = not config.is_active
+    
+    db.session.commit()
+    
+    return redirect(url_for('absence'))
+
+# Rota para logs de token
+@app.route('/token-logs')
+def token_logs_page():
+    if not _initialized:
+        initialize_database()
+    
+    user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
+    if not user:
+        return "❌ Usuário não encontrado", 404
+    
+    logs = TokenLog.query.filter_by(user_id=user.id).order_by(TokenLog.created_at.desc()).limit(50).all()
+    
+    logs_html = ""
+    for log in logs:
+        action_icon = {
+            'renewed': '🔄',
+            'failed': '❌',
+            'checked': '✅'
+        }.get(log.action, '📝')
+        
+        action_color = {
+            'renewed': '#00a650',
+            'failed': '#ff3333',
+            'checked': '#3483fa'
+        }.get(log.action, '#666')
+        
+        logs_html += f"""
+        <div class="log-card" style="border-left: 4px solid {action_color};">
+            <div class="log-header">
+                <h3>{action_icon} {log.action.title()}</h3>
+                <span class="log-date">{log.created_at.strftime('%d/%m/%Y %H:%M:%S')}</span>
+            </div>
+            <div class="log-content">
+                <p><strong>Mensagem:</strong> {log.message}</p>
+                {f'<p><strong>Token Antigo:</strong> {log.old_token}</p>' if log.old_token else ''}
+                {f'<p><strong>Token Novo:</strong> {log.new_token}</p>' if log.new_token else ''}
+                {f'<p><strong>Expira em:</strong> {log.expires_at.strftime("%d/%m/%Y %H:%M:%S")}</p>' if log.expires_at else ''}
+            </div>
+        </div>
+        """
+    
+    html = f"""
+    <!DOCTYPE html>
+    <html lang="pt-BR">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Logs de Token - Bot ML</title>
+        <style>
+            * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+            body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #f8f9fa; }}
+            .container {{ max-width: 1000px; margin: 0 auto; padding: 20px; }}
+            .header {{ background: linear-gradient(135deg, #3483fa, #2968c8); color: white; padding: 30px; border-radius: 12px; margin-bottom: 30px; text-align: center; }}
+            .log-card {{ background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.08); margin-bottom: 20px; }}
+            .log-header {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; }}
+            .log-date {{ font-size: 0.9em; color: #666; }}
+            .log-content p {{ margin-bottom: 10px; }}
+            .back-btn {{ display: inline-block; background: #3483fa; color: white; padding: 12px 24px; text-decoration: none; border-radius: 8px; margin-bottom: 20px; }}
+            .refresh-btn {{ display: inline-block; background: #28a745; color: white; padding: 12px 24px; text-decoration: none; border-radius: 8px; margin-bottom: 20px; margin-left: 10px; }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <a href="/" class="back-btn">← Voltar ao Dashboard</a>
+            <a href="/token-logs/refresh" class="refresh-btn">🔄 Forçar Verificação</a>
+            
+            <div class="header">
+                <h1>🔑 Logs de Token</h1>
+                <p>Histórico de renovações e verificações</p>
+            </div>
+            
+            {logs_html if logs_html else '<div class="log-card"><p>Nenhum log encontrado ainda.</p></div>'}
+        </div>
+    </body>
+    </html>
+    """
+    return html
+
+# Rota para forçar verificação de token
+@app.route('/token-logs/refresh')
+def force_token_check():
+    if not _initialized:
+        initialize_database()
+    
+    # Forçar verificação de token
+    threading.Thread(target=lambda: check_token_expiration(), daemon=True).start()
+    
+    return redirect('/token-logs')
+
+# Webhook do Mercado Livre
+@app.route('/api/ml/webhook', methods=['POST'])
+def ml_webhook():
     try:
         data = request.get_json()
         
         if data and data.get('topic') == 'questions':
-            # Processar notificação de pergunta
-            print(f"📨 Notificação de pergunta recebida: {data}")
-            
-            # Processar perguntas imediatamente
-            threading.Thread(target=lambda: process_questions(), daemon=True).start()
-            
-            return jsonify({"status": "ok", "message": "notificação processada"})
+            # Nova pergunta recebida
+            question_id = data.get('resource')
+            if question_id:
+                # Processar pergunta em thread separada
+                threading.Thread(target=process_questions, daemon=True).start()
         
-        return jsonify({"status": "ok", "message": "webhook recebido"})
-        
+        return jsonify({"status": "ok"}), 200
     except Exception as e:
         print(f"❌ Erro no webhook: {e}")
         return jsonify({"error": str(e)}), 500
@@ -1367,11 +1447,12 @@ def api_rules():
         "id": rule.id,
         "keywords": rule.keywords,
         "response": rule.response_text,
-        "active": rule.is_active
+        "active": rule.is_active,
+        "created_at": rule.created_at.isoformat()
     } for rule in rules])
 
-@app.route('/api/ml/questions/recent')
-def api_recent_questions():
+@app.route('/api/ml/questions')
+def api_questions():
     if not _initialized:
         initialize_database()
     
@@ -1379,15 +1460,16 @@ def api_recent_questions():
     if not user:
         return jsonify({"error": "Usuário não encontrado"}), 404
     
-    questions = Question.query.filter_by(user_id=user.id).order_by(Question.created_at.desc()).limit(10).all()
+    questions = Question.query.filter_by(user_id=user.id).order_by(Question.created_at.desc()).limit(50).all()
     
     return jsonify([{
-        "id": q.ml_question_id,
+        "id": q.id,
         "question": q.question_text,
         "response": q.response_text,
         "answered": q.is_answered,
         "automatic": q.answered_automatically,
-        "date": q.created_at.isoformat()
+        "created_at": q.created_at.isoformat(),
+        "answered_at": q.answered_at.isoformat() if q.answered_at else None
     } for q in questions])
 
 @app.route('/api/ml/absence')
@@ -1414,7 +1496,7 @@ def api_absence():
 # Inicializar aplicação
 initialize_database()
 
-# Iniciar monitoramento
+# Iniciar monitoramento de perguntas
 monitor_thread = threading.Thread(target=monitor_questions, daemon=True)
 monitor_thread.start()
 print("✅ Monitoramento de perguntas iniciado!")
@@ -1424,16 +1506,10 @@ token_thread = threading.Thread(target=monitor_token, daemon=True)
 token_thread.start()
 print("✅ Monitoramento de token iniciado!")
 
-
-# Iniciar monitoramento de token
-token_thread = threading.Thread(target=monitor_token, daemon=True)
-token_thread.start()
-print("✅ Monitoramento de token iniciado!")
-
-
 print("🚀 Bot do Mercado Livre iniciado com sucesso!")
 print(f"🔑 Token: {ML_ACCESS_TOKEN[:20]}...")
 print(f"👤 User ID: {ML_USER_ID}")
+print("🔄 Renovação automática de token ativa!")
 
 if __name__ == '__main__':
     # Executar aplicação
