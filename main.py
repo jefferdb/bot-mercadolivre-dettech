@@ -68,6 +68,17 @@ class AbsenceConfig(db.Model):
     days_of_week = db.Column(db.String(20))  # 0,1,2,3,4,5,6
     is_active = db.Column(db.Boolean, default=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    
+class TokenLog(db.Model):
+    __tablename__ = 'token_logs'
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    action = db.Column(db.String(50), nullable=False)
+    old_token = db.Column(db.String(200))
+    new_token = db.Column(db.String(200))
+    expires_at = db.Column(db.DateTime)
+    message = db.Column(db.Text)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
 # Variável global para controlar inicialização
 _initialized = False
@@ -212,6 +223,111 @@ def is_absence_time():
                     return config.message
     
     return None
+    # Função para renovar token automaticamente
+def renew_access_token():
+    global ML_ACCESS_TOKEN
+    
+    try:
+        user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
+        if not user or not user.refresh_token:
+            print("❌ Usuário ou refresh_token não encontrado")
+            return False
+        
+        url = "https://api.mercadolibre.com/oauth/token"
+        
+        data = {
+            "grant_type": "refresh_token",
+            "client_id": ML_CLIENT_ID,
+            "client_secret": ML_CLIENT_SECRET,
+            "refresh_token": user.refresh_token
+        }
+        
+        headers = {"Content-Type": "application/x-www-form-urlencoded"}
+        
+        print(f"🔄 Renovando token para usuário {ML_USER_ID}..." )
+        
+        response = requests.post(url, data=data, headers=headers)
+        
+        if response.status_code == 200:
+            token_data = response.json()
+            
+            old_token = user.access_token
+            new_access_token = token_data.get("access_token")
+            new_refresh_token = token_data.get("refresh_token", user.refresh_token)
+            expires_in = token_data.get("expires_in", 21600)
+            
+            user.access_token = new_access_token
+            user.refresh_token = new_refresh_token
+            user.token_expires_at = datetime.utcnow() + timedelta(seconds=expires_in)
+            user.updated_at = datetime.utcnow()
+            
+            ML_ACCESS_TOKEN = new_access_token
+            
+            log = TokenLog(
+                user_id=user.id,
+                action="renewed",
+                old_token=old_token[:20] + "...",
+                new_token=new_access_token[:20] + "...",
+                expires_at=user.token_expires_at,
+                message=f"Token renovado com sucesso. Expira em {expires_in} segundos."
+            )
+            db.session.add(log)
+            db.session.commit()
+            
+            print(f"✅ Token renovado com sucesso! Expira em {expires_in} segundos")
+            return True
+            
+        else:
+            error_msg = f"Erro {response.status_code}: {response.text}"
+            print(f"❌ Erro ao renovar token: {error_msg}")
+            
+            log = TokenLog(
+                user_id=user.id,
+                action="failed",
+                message=error_msg
+            )
+            db.session.add(log)
+            db.session.commit()
+            return False
+            
+    except Exception as e:
+        error_msg = f"Exceção ao renovar token: {str(e)}"
+        print(f"❌ {error_msg}")
+        return False
+
+# Função para verificar se token precisa ser renovado
+def check_token_expiration():
+    try:
+        user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
+        if not user or not user.token_expires_at:
+            print("⚠️ Usuário ou data de expiração não encontrada")
+            return False
+        
+        now = datetime.utcnow()
+        expires_at = user.token_expires_at
+        time_until_expiry = expires_at - now
+        
+        if time_until_expiry.total_seconds() < 1800:  # 30 minutos
+            print(f"⏰ Token expira em {time_until_expiry}. Renovando...")
+            return renew_access_token()
+        else:
+            minutes_left = int(time_until_expiry.total_seconds() / 60)
+            print(f"✅ Token válido por mais {minutes_left} minutos")
+            
+            log = TokenLog(
+                user_id=user.id,
+                action="checked",
+                expires_at=expires_at,
+                message=f"Token verificado. Válido por mais {minutes_left} minutos."
+            )
+            db.session.add(log)
+            db.session.commit()
+            return True
+            
+    except Exception as e:
+        print(f"❌ Erro ao verificar expiração do token: {e}")
+        return False
+
 
 # Função para encontrar resposta automática
 def find_auto_response(question_text):
@@ -335,6 +451,18 @@ def process_questions():
 
 # Função de monitoramento contínuo
 def monitor_questions():
+
+    # Função de monitoramento de token
+def monitor_token():
+    while True:
+        try:
+            with app.app_context():
+                check_token_expiration()
+            time.sleep(3600)  # Verificar a cada 1 hora
+        except Exception as e:
+            print(f"❌ Erro no monitoramento de token: {e}")
+            time.sleep(3600)
+
     while True:
         try:
             with app.app_context():
@@ -1292,6 +1420,18 @@ initialize_database()
 monitor_thread = threading.Thread(target=monitor_questions, daemon=True)
 monitor_thread.start()
 print("✅ Monitoramento de perguntas iniciado!")
+
+# Iniciar monitoramento de token
+token_thread = threading.Thread(target=monitor_token, daemon=True)
+token_thread.start()
+print("✅ Monitoramento de token iniciado!")
+
+
+# Iniciar monitoramento de token
+token_thread = threading.Thread(target=monitor_token, daemon=True)
+token_thread.start()
+print("✅ Monitoramento de token iniciado!")
+
 
 print("🚀 Bot do Mercado Livre iniciado com sucesso!")
 print(f"🔑 Token: {ML_ACCESS_TOKEN[:20]}...")
