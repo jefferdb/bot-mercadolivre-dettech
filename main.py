@@ -85,88 +85,111 @@ class TokenLog(db.Model):
 # Variável global para controlar inicialização
 _initialized = False
 
-# Função para FORÇAR recriação do banco
-def force_recreate_database():
-    global _initialized, token_expires_at
+# Função para GARANTIR criação do usuário
+def ensure_user_exists():
+    global token_expires_at
+    
+    try:
+        print(f"🔍 Procurando usuário com ML_USER_ID: {ML_USER_ID}")
+        
+        # Buscar usuário
+        user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
+        
+        if user:
+            print(f"✅ Usuário encontrado: ID {user.id}")
+            token_expires_at = user.token_expires_at
+            return user
+        
+        print("❌ Usuário não encontrado. Criando novo usuário...")
+        
+        # Criar usuário
+        user = User(
+            ml_user_id=ML_USER_ID,
+            access_token=ML_ACCESS_TOKEN,
+            refresh_token='TG-6882f8e7f04d54000...',  # Placeholder
+            token_expires_at=datetime.utcnow() + timedelta(hours=6)
+        )
+        
+        db.session.add(user)
+        db.session.commit()
+        
+        print(f"✅ Usuário criado com sucesso! ID: {user.id}")
+        
+        # Criar regras de resposta padrão
+        default_responses = [
+            ("preço,valor,custa,quanto", "Obrigado pela pergunta! O preço está na descrição do anúncio. Qualquer dúvida, estamos à disposição!"),
+            ("entrega,envio,frete", "Trabalhamos com entrega para todo o Brasil via Mercado Envios. O prazo e valor aparecem no anúncio."),
+            ("disponível,estoque,tem", "Sim, temos disponível! Pode fazer sua compra com tranquilidade."),
+            ("garantia", "Oferecemos garantia conforme especificado no anúncio. Estamos sempre à disposição!"),
+            ("desconto,promoção", "Os melhores preços já estão aplicados! Aproveite nossas ofertas."),
+            ("pagamento,cartão,pix", "Aceitamos todas as formas de pagamento do Mercado Livre: cartão, PIX, boleto."),
+            ("dúvida,informação,detalhes", "Ficamos felizes em ajudar! Todas as informações estão na descrição. Qualquer dúvida, pergunte!"),
+            ("horário,atendimento", "Nosso horário de atendimento é das 8h às 18h, de segunda a sexta. Responderemos assim que possível!"),
+            ("qualidade,original", "Trabalhamos apenas com produtos de qualidade e originais. Sua satisfação é nossa prioridade!"),
+            ("tamanho,medida,dimensão", "As medidas e especificações estão detalhadas na descrição do produto. Confira lá!")
+        ]
+        
+        for keywords, response in default_responses:
+            auto_response = AutoResponse(
+                user_id=user.id,
+                keywords=keywords,
+                response_text=response
+            )
+            db.session.add(auto_response)
+        
+        # Criar configurações de ausência padrão
+        absence_configs = [
+            ("Horário Comercial", "Obrigado pela pergunta! Nosso atendimento é das 8h às 18h. Responderemos em breve!", "18:00", "08:00", "0,1,2,3,4,5,6"),
+            ("Final de Semana", "Obrigado pelo contato! Não trabalhamos aos finais de semana. Responderemos na segunda-feira!", "00:00", "23:59", "5,6")
+        ]
+        
+        for name, message, start, end, days in absence_configs:
+            config = AbsenceConfig(
+                user_id=user.id,
+                name=name,
+                message=message,
+                start_time=start,
+                end_time=end,
+                days_of_week=days,
+                is_active=False  # Desativado por padrão
+            )
+            db.session.add(config)
+        
+        db.session.commit()
+        print("✅ Dados iniciais criados com sucesso!")
+        
+        token_expires_at = user.token_expires_at
+        return user
+        
+    except Exception as e:
+        print(f"❌ Erro ao garantir usuário: {e}")
+        db.session.rollback()
+        return None
+
+# Função para inicializar banco
+def initialize_database():
+    global _initialized
+    if _initialized:
+        return
     
     try:
         with app.app_context():
-            print("🔄 Forçando recriação do banco de dados...")
+            print("🔄 Inicializando banco de dados...")
             
-            # Dropar todas as tabelas
-            db.drop_all()
-            print("✅ Tabelas antigas removidas")
-            
-            # Criar todas as tabelas novamente
+            # Criar todas as tabelas
             db.create_all()
-            print("✅ Tabelas novas criadas")
+            print("✅ Tabelas criadas/verificadas")
             
-            # Verificar se usuário já existe
-            user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
-            if not user:
-                # Criar usuário inicial
-                user = User(
-                    ml_user_id=ML_USER_ID,
-                    access_token=ML_ACCESS_TOKEN,
-                    refresh_token='TG-6882f8e7f04d54000...',  # Placeholder
-                    token_expires_at=datetime.utcnow() + timedelta(hours=6)
-                )
-                db.session.add(user)
-                
-                # Criar regras de resposta padrão
-                default_responses = [
-                    ("preço,valor,custa,quanto", "Obrigado pela pergunta! O preço está na descrição do anúncio. Qualquer dúvida, estamos à disposição!"),
-                    ("entrega,envio,frete", "Trabalhamos com entrega para todo o Brasil via Mercado Envios. O prazo e valor aparecem no anúncio."),
-                    ("disponível,estoque,tem", "Sim, temos disponível! Pode fazer sua compra com tranquilidade."),
-                    ("garantia", "Oferecemos garantia conforme especificado no anúncio. Estamos sempre à disposição!"),
-                    ("desconto,promoção", "Os melhores preços já estão aplicados! Aproveite nossas ofertas."),
-                    ("pagamento,cartão,pix", "Aceitamos todas as formas de pagamento do Mercado Livre: cartão, PIX, boleto."),
-                    ("dúvida,informação,detalhes", "Ficamos felizes em ajudar! Todas as informações estão na descrição. Qualquer dúvida, pergunte!"),
-                    ("horário,atendimento", "Nosso horário de atendimento é das 8h às 18h, de segunda a sexta. Responderemos assim que possível!"),
-                    ("qualidade,original", "Trabalhamos apenas com produtos de qualidade e originais. Sua satisfação é nossa prioridade!"),
-                    ("tamanho,medida,dimensão", "As medidas e especificações estão detalhadas na descrição do produto. Confira lá!")
-                ]
-                
-                for keywords, response in default_responses:
-                    auto_response = AutoResponse(
-                        user_id=user.id,
-                        keywords=keywords,
-                        response_text=response
-                    )
-                    db.session.add(auto_response)
-                
-                # Criar configurações de ausência padrão
-                absence_configs = [
-                    ("Horário Comercial", "Obrigado pela pergunta! Nosso atendimento é das 8h às 18h. Responderemos em breve!", "18:00", "08:00", "0,1,2,3,4,5,6"),
-                    ("Final de Semana", "Obrigado pelo contato! Não trabalhamos aos finais de semana. Responderemos na segunda-feira!", "00:00", "23:59", "5,6")
-                ]
-                
-                for name, message, start, end, days in absence_configs:
-                    config = AbsenceConfig(
-                        user_id=user.id,
-                        name=name,
-                        message=message,
-                        start_time=start,
-                        end_time=end,
-                        days_of_week=days,
-                        is_active=False  # Desativado por padrão
-                    )
-                    db.session.add(config)
-                
-                db.session.commit()
-                print("✅ Dados iniciais criados com sucesso!")
-                
-            # Definir expiração do token
-            token_expires_at = user.token_expires_at
-            _initialized = True
-            print("✅ Banco de dados inicializado com sucesso!")
+            # Garantir que usuário existe
+            user = ensure_user_exists()
+            if user:
+                print("✅ Usuário garantido no banco")
+                _initialized = True
+            else:
+                print("❌ Falha ao garantir usuário")
                 
     except Exception as e:
         print(f"❌ Erro ao inicializar banco: {e}")
-
-def initialize_database():
-    if not _initialized:
-        force_recreate_database()
 
 # Função SIMPLES para renovar token
 def renew_token_simple():
@@ -229,7 +252,7 @@ def renew_token_simple():
         print(f"❌ Erro na renovação: {e}")
         return False
 
-# Função para verificar se token precisa renovação (A CADA 5 HORAS)
+# Função para verificar se token precisa renovação
 def check_and_renew_token():
     global token_expires_at
     
@@ -407,7 +430,7 @@ def process_questions():
     except Exception as e:
         print(f"❌ Erro ao processar perguntas: {e}")
 
-# Função de monitoramento SIMPLES (verifica token a cada 5 horas)
+# Função de monitoramento SIMPLES
 def monitor_questions():
     token_check_counter = 0
     while True:
@@ -431,9 +454,21 @@ def dashboard():
     try:
         initialize_database()
         
+        # Debug: Listar todos os usuários
+        all_users = User.query.all()
+        print(f"🔍 DEBUG: Total de usuários no banco: {len(all_users)}")
+        for u in all_users:
+            print(f"   - ID: {u.id}, ML_USER_ID: {u.ml_user_id}")
+        
         user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
         if not user:
-            return "❌ Usuário não encontrado", 404
+            print(f"❌ DEBUG: Usuário com ML_USER_ID '{ML_USER_ID}' não encontrado")
+            # Tentar criar usuário na hora
+            user = ensure_user_exists()
+            if not user:
+                return f"❌ Erro: Não foi possível criar usuário com ML_USER_ID: {ML_USER_ID}", 404
+        
+        print(f"✅ DEBUG: Usuário encontrado - ID: {user.id}")
         
         # Estatísticas
         total_questions = Question.query.filter_by(user_id=user.id).count()
@@ -506,12 +541,17 @@ def dashboard():
                 .status-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 15px; }
                 .status-item { padding: 10px; background: #f8f9fa; border-radius: 5px; }
                 .success { background: #d4edda; color: #155724; padding: 15px; border-radius: 5px; margin-bottom: 20px; }
+                .debug { background: #fff3cd; color: #856404; padding: 15px; border-radius: 5px; margin-bottom: 20px; }
             </style>
         </head>
         <body>
             <div class="container">
                 <div class="success">
-                    ✅ <strong>Banco de dados recriado com sucesso!</strong> Estrutura corrigida e funcionando.
+                    ✅ <strong>Usuário encontrado e funcionando!</strong> Sistema operacional.
+                </div>
+                
+                <div class="debug">
+                    🔍 <strong>Debug Info:</strong> User ID: {{ user.id }} | ML_USER_ID: {{ user.ml_user_id }}
                 </div>
                 
                 <div class="header">
@@ -575,6 +615,7 @@ def dashboard():
         </body>
         </html>
         """, 
+        user=user,
         total_questions=total_questions,
         answered_questions=answered_questions, 
         pending_questions=pending_questions,
