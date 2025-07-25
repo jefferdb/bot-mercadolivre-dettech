@@ -1,12 +1,15 @@
 import os
 import time
 import threading
+import webbrowser
+import json
 from datetime import datetime, timedelta, timezone
 from flask import Flask, request, jsonify, redirect, url_for, render_template_string
 from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
 import requests
 import sqlite3
+from urllib.parse import urlparse, parse_qs
 
 # Configuração da aplicação
 app = Flask(__name__)
@@ -46,9 +49,10 @@ db = SQLAlchemy(app)
 # Configurações do Mercado Livre - TOKENS ATUALIZADOS
 ML_CLIENT_ID = os.getenv('ML_CLIENT_ID', '5510376630479325')
 ML_CLIENT_SECRET = os.getenv('ML_CLIENT_SECRET', 'jlR4As2x8uFY3RTpysLpuPhzC9yM9d35')
-ML_ACCESS_TOKEN = os.getenv('ML_ACCESS_TOKEN', 'APP_USR-5510376630479325-072423-41cbc33fddb983f73eaf5aa1b1b7f699-180617463')
-ML_USER_ID = os.getenv('ML_USER_ID', '180617463')
-ML_REFRESH_TOKEN = os.getenv('ML_REFRESH_TOKEN', '')  # Adicionar refresh token aqui
+ML_ACCESS_TOKEN = os.getenv('ML_ACCESS_TOKEN', 'APP_USR-5510376630479325-072510-3856f0dd08ffef776be18d229421585b-1030911519')
+ML_USER_ID = os.getenv('ML_USER_ID', '1030911519')
+ML_REFRESH_TOKEN = os.getenv('ML_REFRESH_TOKEN', 'TG-6883987a2477e4000...')  # Adicionar refresh token aqui
+REDIRECT_URI = "https://bot-mercadolivre-dettech.onrender.com/api/ml/auth-callback"
 
 # Variáveis globais para status do token
 TOKEN_STATUS = {
@@ -317,6 +321,332 @@ def make_ml_request(url, method='GET', headers=None, data=None, max_retries=1):
     
     return None, "Máximo de tentativas excedido"
 
+# ========== SISTEMA DE RENOVAÇÃO DE TOKENS INTEGRADO ==========
+
+def generate_auth_url():
+    """Gera URL para autorização no Mercado Livre"""
+    base_url = "https://auth.mercadolivre.com.br/authorization"
+    params = {
+        "response_type": "code",
+        "client_id": ML_CLIENT_ID,
+        "redirect_uri": REDIRECT_URI,
+        "scope": "offline_access read write"
+    }
+    
+    url_params = "&".join([f"{k}={v}" for k, v in params.items()])
+    return f"{base_url}?{url_params}"
+
+def get_tokens_from_code(authorization_code):
+    """Obtém tokens usando o código de autorização"""
+    url = "https://api.mercadolibre.com/oauth/token"
+    
+    data = {
+        "grant_type": "authorization_code",
+        "client_id": ML_CLIENT_ID,
+        "client_secret": ML_CLIENT_SECRET,
+        "code": authorization_code,
+        "redirect_uri": REDIRECT_URI
+    }
+    
+    try:
+        response = requests.post(url, data=data, timeout=30)
+        if response.status_code == 200:
+            return response.json(), None
+        else:
+            return None, f"Erro {response.status_code}: {response.text}"
+    except requests.exceptions.RequestException as e:
+        return None, f"Erro na requisição: {e}"
+
+def get_user_info(access_token):
+    """Obtém informações do usuário"""
+    url = "https://api.mercadolibre.com/users/me"
+    headers = {"Authorization": f"Bearer {access_token}"}
+    
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        if response.status_code == 200:
+            return response.json(), None
+        else:
+            return None, f"Erro ao obter user info: {response.status_code}"
+    except requests.exceptions.RequestException as e:
+        return None, f"Erro: {e}"
+
+def update_system_tokens(tokens_data, user_info=None):
+    """Atualiza tokens no sistema"""
+    global TOKEN_STATUS, ML_ACCESS_TOKEN, ML_USER_ID, ML_REFRESH_TOKEN
+    
+    try:
+        # Atualizar variáveis globais
+        new_access_token = tokens_data.get("access_token")
+        new_refresh_token = tokens_data.get("refresh_token")
+        new_user_id = str(user_info.get("id")) if user_info else ML_USER_ID
+        
+        TOKEN_STATUS['current_token'] = new_access_token
+        TOKEN_STATUS['refresh_token'] = new_refresh_token
+        TOKEN_STATUS['valid'] = True
+        TOKEN_STATUS['error_message'] = None
+        TOKEN_STATUS['last_check'] = get_local_time()
+        
+        # Atualizar variáveis de ambiente
+        os.environ['ML_ACCESS_TOKEN'] = new_access_token
+        os.environ['ML_REFRESH_TOKEN'] = new_refresh_token
+        os.environ['ML_USER_ID'] = new_user_id
+        
+        ML_ACCESS_TOKEN = new_access_token
+        ML_REFRESH_TOKEN = new_refresh_token
+        ML_USER_ID = new_user_id
+        
+        # Salvar no banco
+        save_tokens_to_db(new_access_token, new_refresh_token)
+        
+        print(f"✅ Sistema atualizado com novos tokens!")
+        print(f"🔑 Access Token: {new_access_token[:20]}...")
+        print(f"🔄 Refresh Token: {new_refresh_token[:20]}...")
+        print(f"👤 User ID: {new_user_id}")
+        
+        return True, "Tokens atualizados com sucesso"
+        
+    except Exception as e:
+        error_msg = f"Erro ao atualizar tokens: {str(e)}"
+        print(f"❌ {error_msg}")
+        return False, error_msg
+
+# ========== ROTAS DE RENOVAÇÃO DE TOKENS ==========
+
+@app.route('/renovar-tokens')
+def renovar_tokens_page():
+    """Interface para renovação de tokens"""
+    auth_url = generate_auth_url()
+    
+    html = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Renovar Tokens - Bot ML</title>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <style>
+            body {{ font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }}
+            .container {{ max-width: 800px; margin: 0 auto; }}
+            .card {{ background: #fff; padding: 20px; border-radius: 8px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
+            .nav a {{ display: inline-block; padding: 10px 20px; background: #2196F3; color: white; text-decoration: none; border-radius: 4px; margin-right: 10px; }}
+            .nav a:hover {{ background: #1976D2; }}
+            .btn {{ padding: 12px 24px; background: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer; text-decoration: none; display: inline-block; font-size: 16px; }}
+            .btn:hover {{ background: #45a049; }}
+            .btn-primary {{ background: #2196F3; }}
+            .btn-primary:hover {{ background: #1976D2; }}
+            .btn-warning {{ background: #ff9800; }}
+            .btn-warning:hover {{ background: #e68900; }}
+            .form-group {{ margin-bottom: 15px; }}
+            label {{ display: block; margin-bottom: 5px; font-weight: bold; }}
+            input, textarea {{ width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box; font-size: 14px; }}
+            .alert {{ padding: 15px; border-radius: 4px; margin-bottom: 20px; }}
+            .alert-info {{ background: #e3f2fd; border: 1px solid #2196F3; color: #1976D2; }}
+            .alert-success {{ background: #e8f5e8; border: 1px solid #4CAF50; color: #2e7d32; }}
+            .alert-danger {{ background: #ffebee; border: 1px solid #f44336; color: #c62828; }}
+            .step {{ background: #f8f9fa; padding: 15px; border-left: 4px solid #2196F3; margin-bottom: 15px; }}
+            .step h4 {{ margin: 0 0 10px 0; color: #1976D2; }}
+            .code-box {{ background: #f5f5f5; padding: 10px; border-radius: 4px; font-family: monospace; word-break: break-all; }}
+        </style>
+        <script>
+            function abrirAutorizacao() {{
+                window.open('{auth_url}', '_blank');
+            }}
+            
+            function processarCodigo() {{
+                const codigo = document.getElementById('codigo').value.trim();
+                if (!codigo) {{
+                    alert('Por favor, insira o código de autorização');
+                    return;
+                }}
+                
+                document.getElementById('loading').style.display = 'block';
+                document.getElementById('btn-processar').disabled = true;
+                
+                fetch('/api/tokens/process-code', {{
+                    method: 'POST',
+                    headers: {{
+                        'Content-Type': 'application/json'
+                    }},
+                    body: JSON.stringify({{code: codigo}})
+                }})
+                .then(response => response.json())
+                .then(data => {{
+                    document.getElementById('loading').style.display = 'none';
+                    document.getElementById('btn-processar').disabled = false;
+                    
+                    if (data.success) {{
+                        document.getElementById('resultado').innerHTML = `
+                            <div class="alert alert-success">
+                                <h4>✅ Tokens Atualizados com Sucesso!</h4>
+                                <p><strong>Access Token:</strong> ${{data.access_token.substring(0, 30)}}...</p>
+                                <p><strong>User ID:</strong> ${{data.user_id}}</p>
+                                <p><strong>Email:</strong> ${{data.user_email}}</p>
+                                <p><strong>Expira em:</strong> ${{data.expires_in}} segundos</p>
+                                <p>🎉 Sistema atualizado automaticamente!</p>
+                            </div>
+                        `;
+                        document.getElementById('codigo').value = '';
+                        
+                        // Recarregar página após 3 segundos
+                        setTimeout(() => {{
+                            window.location.href = '/';
+                        }}, 3000);
+                    }} else {{
+                        document.getElementById('resultado').innerHTML = `
+                            <div class="alert alert-danger">
+                                <h4>❌ Erro ao Processar Código</h4>
+                                <p>${{data.error}}</p>
+                            </div>
+                        `;
+                    }}
+                }})
+                .catch(error => {{
+                    document.getElementById('loading').style.display = 'none';
+                    document.getElementById('btn-processar').disabled = false;
+                    document.getElementById('resultado').innerHTML = `
+                        <div class="alert alert-danger">
+                            <h4>❌ Erro na Requisição</h4>
+                            <p>${{error}}</p>
+                        </div>
+                    `;
+                }});
+            }}
+        </script>
+    </head>
+    <body>
+        <div class="container">
+            <div class="card">
+                <h1>🔄 Renovar Tokens do Bot</h1>
+                <div class="nav">
+                    <a href="/">🏠 Dashboard</a>
+                    <a href="/token-status">🔑 Status Token</a>
+                    <a href="/edit-rules">✏️ Regras</a>
+                </div>
+            </div>
+            
+            <div class="card">
+                <div class="alert alert-info">
+                    <h4>ℹ️ Como Renovar os Tokens</h4>
+                    <p>Este processo gera novos tokens de acesso que duram 6 horas e refresh tokens para renovação automática.</p>
+                </div>
+                
+                <div class="step">
+                    <h4>📋 Passo 1: Autorizar Aplicação</h4>
+                    <p>Clique no botão abaixo para abrir a página de autorização do Mercado Livre:</p>
+                    <button class="btn btn-primary" onclick="abrirAutorizacao()">
+                        🌐 Abrir Autorização do ML
+                    </button>
+                </div>
+                
+                <div class="step">
+                    <h4>🔑 Passo 2: Obter Código</h4>
+                    <p>Após autorizar:</p>
+                    <ol>
+                        <li>✅ Faça login no Mercado Livre</li>
+                        <li>✅ Autorize a aplicação</li>
+                        <li>✅ Você será redirecionado (pode dar erro, é normal)</li>
+                        <li>✅ <strong>Copie o código da URL</strong> (ex: TG-abc123...)</li>
+                    </ol>
+                </div>
+                
+                <div class="step">
+                    <h4>🔄 Passo 3: Processar Código</h4>
+                    <div class="form-group">
+                        <label for="codigo">Cole o código de autorização aqui:</label>
+                        <input type="text" id="codigo" placeholder="TG-abc123def456..." />
+                    </div>
+                    <button class="btn btn-warning" onclick="processarCodigo()" id="btn-processar">
+                        🔄 Processar e Atualizar Tokens
+                    </button>
+                    <div id="loading" style="display: none; margin-top: 10px;">
+                        <p>⏳ Processando código e atualizando sistema...</p>
+                    </div>
+                </div>
+                
+                <div id="resultado"></div>
+            </div>
+            
+            <div class="card">
+                <h3>🔗 URL de Redirect Configurada</h3>
+                <div class="code-box">{REDIRECT_URI}</div>
+                <p><small>Esta URL deve estar configurada no painel de desenvolvedores do Mercado Livre.</small></p>
+            </div>
+        </div>
+    </body>
+    </html>
+    """
+    
+    return html
+
+@app.route('/api/ml/auth-callback')
+def auth_callback():
+    """Callback para receber código de autorização"""
+    code = request.args.get('code')
+    error = request.args.get('error')
+    
+    if error:
+        return f"""
+        <h1>❌ Erro na Autorização</h1>
+        <p>Erro: {error}</p>
+        <p>Descrição: {request.args.get('error_description', 'N/A')}</p>
+        <a href="/renovar-tokens">🔄 Tentar Novamente</a>
+        """
+    
+    if code:
+        return f"""
+        <h1>✅ Código Recebido!</h1>
+        <p><strong>Código de Autorização:</strong></p>
+        <div style="background: #f5f5f5; padding: 10px; border-radius: 4px; font-family: monospace; word-break: break-all;">
+            {code}
+        </div>
+        <p>Copie este código e cole na interface de renovação.</p>
+        <a href="/renovar-tokens">🔄 Ir para Renovação</a>
+        """
+    
+    return """
+    <h1>❌ Código não encontrado</h1>
+    <p>Não foi possível obter o código de autorização.</p>
+    <a href="/renovar-tokens">🔄 Tentar Novamente</a>
+    """
+
+@app.route('/api/tokens/process-code', methods=['POST'])
+def process_authorization_code():
+    """API para processar código de autorização e atualizar tokens"""
+    try:
+        data = request.get_json()
+        code = data.get('code', '').strip()
+        
+        if not code:
+            return jsonify({'success': False, 'error': 'Código não fornecido'})
+        
+        # Obter tokens do código
+        tokens_data, error = get_tokens_from_code(code)
+        if error:
+            return jsonify({'success': False, 'error': error})
+        
+        # Obter informações do usuário
+        user_info, error = get_user_info(tokens_data.get('access_token'))
+        if error:
+            print(f"⚠️ Aviso: {error}")
+        
+        # Atualizar sistema
+        success, message = update_system_tokens(tokens_data, user_info)
+        if not success:
+            return jsonify({'success': False, 'error': message})
+        
+        return jsonify({
+            'success': True,
+            'message': 'Tokens atualizados com sucesso',
+            'access_token': tokens_data.get('access_token'),
+            'user_id': user_info.get('id') if user_info else 'N/A',
+            'user_email': user_info.get('email') if user_info else 'N/A',
+            'expires_in': tokens_data.get('expires_in')
+        })
+        
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
 # ========== FUNÇÕES ORIGINAIS ADAPTADAS ==========
 
 def get_questions():
@@ -359,7 +689,8 @@ def answer_question(question_id, answer_text):
         print(f"💥 Erro ao responder pergunta {question_id}: {e}")
         return False
 
-# ========== CONTINUAÇÃO DO CÓDIGO ORIGINAL ==========
+
+# ========== FUNÇÕES DE PROCESSAMENTO ==========
 
 def init_database():
     """Inicializa o banco de dados"""
@@ -467,16 +798,6 @@ def monitor_token():
         except Exception as e:
             print(f"❌ Erro no monitoramento de token: {e}")
             time.sleep(300)
-
-# Iniciar monitoramento em thread separada
-def start_token_monitoring():
-    """Inicia o monitoramento de token em background"""
-    monitor_thread = threading.Thread(target=monitor_token, daemon=True)
-    monitor_thread.start()
-    print("🔍 Monitoramento de token iniciado")
-
-
-# ========== FUNÇÕES DE PROCESSAMENTO ==========
 
 def is_absence_time():
     """Verifica se está em horário de ausência"""
@@ -617,6 +938,12 @@ def polling_loop():
             print(f"❌ Erro no polling: {e}")
             time.sleep(60)  # Esperar mais tempo em caso de erro
 
+def start_token_monitoring():
+    """Inicia o monitoramento de token em background"""
+    monitor_thread = threading.Thread(target=monitor_token, daemon=True)
+    monitor_thread.start()
+    print("🔍 Monitoramento de token iniciado")
+
 # ========== ROTAS WEB ==========
 
 @app.route('/')
@@ -688,6 +1015,8 @@ def dashboard():
                     .btn:hover {{ background: #45a049; }}
                     .btn-warning {{ background: #ff9800; }}
                     .btn-warning:hover {{ background: #e68900; }}
+                    .btn-danger {{ background: #f44336; }}
+                    .btn-danger:hover {{ background: #da190b; }}
                 </style>
                 <script>
                     function refreshPage() {{ window.location.reload(); }}
@@ -717,6 +1046,7 @@ def dashboard():
                         <a href="/history">📊 Histórico</a>
                         <a href="/token-status">🔑 Status do Token</a>
                         <a href="/questions">❓ Perguntas</a>
+                        <a href="/renovar-tokens" style="background: #ff9800;">🔄 Renovar Tokens</a>
                     </div>
                     
                     <div class="token-status">
@@ -730,6 +1060,7 @@ def dashboard():
                         <p><strong>Última Verificação:</strong> {token_status['last_check'].strftime('%H:%M:%S') if token_status['last_check'] else 'Nunca'}</p>
                         <p><strong>Mensagem:</strong> {token_status['message']}</p>
                         <button class="btn btn-warning" onclick="checkToken()">🔄 Verificar Agora</button>
+                        {'<a href="/renovar-tokens" class="btn btn-danger">🚨 Renovar Tokens</a>' if not token_status['valid'] else ''}
                     </div>
                     
                     <div class="stats">
@@ -778,7 +1109,7 @@ def check_token_api():
             else:
                 return jsonify({
                     'success': False,
-                    'message': f'Token inválido e falha na renovação: {refresh_message}',
+                    'message': f'Token inválido. Use a interface de renovação para gerar novos tokens.',
                     'status': 'error'
                 })
         else:
@@ -795,6 +1126,7 @@ def check_token_api():
             'status': 'error'
         })
 
+# Incluir todas as outras rotas do sistema original...
 @app.route('/edit-rules')
 def edit_rules():
     """Interface para editar regras de resposta"""
@@ -836,6 +1168,7 @@ def edit_rules():
                             <a href="/">🏠 Dashboard</a>
                             <a href="/edit-absence">🌙 Ausência</a>
                             <a href="/history">📊 Histórico</a>
+                            <a href="/renovar-tokens">🔄 Renovar Tokens</a>
                         </div>
                     </div>
                     
@@ -936,6 +1269,7 @@ def delete_rule(rule_id):
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+# Adicionar outras rotas necessárias (history, questions, edit-absence, etc.)
 @app.route('/history')
 def history():
     """Página de histórico de respostas"""
@@ -979,6 +1313,7 @@ def history():
                             <a href="/">🏠 Dashboard</a>
                             <a href="/edit-rules">✏️ Regras</a>
                             <a href="/questions">❓ Perguntas</a>
+                            <a href="/renovar-tokens">🔄 Renovar Tokens</a>
                         </div>
                     </div>
                     
@@ -1034,127 +1369,6 @@ def history():
     except Exception as e:
         return f"Erro: {e}"
 
-@app.route('/token-status')
-def token_status_page():
-    """Página detalhada do status do token"""
-    try:
-        with app.app_context():
-            # Verificar token atual
-            is_valid, message = check_token_validity()
-            
-            # Buscar logs recentes
-            user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
-            if user:
-                logs = TokenLog.query.filter_by(user_id=user.id).order_by(TokenLog.checked_at.desc()).limit(20).all()
-            else:
-                logs = []
-            
-            html = f"""
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <title>Status do Token - Bot ML</title>
-                <meta charset="utf-8">
-                <style>
-                    body {{ font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }}
-                    .container {{ max-width: 1000px; margin: 0 auto; }}
-                    .card {{ background: #fff; padding: 20px; border-radius: 8px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
-                    .status-valid {{ color: #4CAF50; font-weight: bold; }}
-                    .status-invalid {{ color: #f44336; font-weight: bold; }}
-                    .nav a {{ display: inline-block; padding: 10px 20px; background: #2196F3; color: white; text-decoration: none; border-radius: 4px; margin-right: 10px; }}
-                    .btn {{ padding: 10px 20px; background: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer; }}
-                    .btn:hover {{ background: #45a049; }}
-                    table {{ width: 100%; border-collapse: collapse; }}
-                    th, td {{ padding: 10px; text-align: left; border-bottom: 1px solid #ddd; }}
-                    th {{ background: #f5f5f5; }}
-                    .log-valid {{ color: #4CAF50; }}
-                    .log-expired {{ color: #f44336; }}
-                    .log-error {{ color: #ff9800; }}
-                    .log-renewed {{ color: #2196F3; }}
-                </style>
-                <script>
-                    function checkToken() {{
-                        fetch('/api/token/check', {{method: 'POST'}})
-                        .then(response => response.json())
-                        .then(data => {{
-                            alert(data.message || 'Verificação concluída');
-                            window.location.reload();
-                        }})
-                        .catch(error => alert('Erro: ' + error));
-                    }}
-                </script>
-            </head>
-            <body>
-                <div class="container">
-                    <div class="card">
-                        <h1>🔑 Status do Token</h1>
-                        <div class="nav">
-                            <a href="/">🏠 Dashboard</a>
-                            <a href="/edit-rules">✏️ Regras</a>
-                            <a href="/history">📊 Histórico</a>
-                        </div>
-                    </div>
-                    
-                    <div class="card">
-                        <h3>📊 Status Atual</h3>
-                        <p><strong>Status:</strong> 
-                            <span class="{'status-valid' if is_valid else 'status-invalid'}">
-                                {'✅ Válido' if is_valid else '❌ Inválido'}
-                            </span>
-                        </p>
-                        <p><strong>Token:</strong> {TOKEN_STATUS.get('current_token', '')[:30]}...</p>
-                        <p><strong>Última Verificação:</strong> {TOKEN_STATUS.get('last_check').strftime('%d/%m/%Y %H:%M:%S') if TOKEN_STATUS.get('last_check') else 'Nunca'}</p>
-                        <p><strong>Mensagem:</strong> {message}</p>
-                        <button class="btn" onclick="checkToken()">🔄 Verificar e Renovar Agora</button>
-                    </div>
-                    
-                    <div class="card">
-                        <h3>📋 Logs de Verificação</h3>
-                        <table>
-                            <thead>
-                                <tr>
-                                    <th>Data/Hora</th>
-                                    <th>Status</th>
-                                    <th>Mensagem</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-            """
-            
-            for log in logs:
-                checked_at = format_local_time(log.checked_at)
-                date_str = checked_at.strftime('%d/%m %H:%M:%S') if checked_at else 'N/A'
-                
-                status_class = f"log-{log.token_status}"
-                status_text = {
-                    'valid': '✅ Válido',
-                    'expired': '❌ Expirado',
-                    'error': '⚠️ Erro',
-                    'renewed': '🔄 Renovado'
-                }.get(log.token_status, log.token_status)
-                
-                html += f"""
-                                <tr>
-                                    <td>{date_str}</td>
-                                    <td class="{status_class}">{status_text}</td>
-                                    <td>{log.error_message or '-'}</td>
-                                </tr>
-                """
-            
-            html += """
-                            </tbody>
-                        </table>
-                    </div>
-                </div>
-            </body>
-            </html>
-            """
-            
-            return html
-            
-    except Exception as e:
-        return f"Erro: {e}"
-
 @app.route('/questions')
 def questions_page():
     """Página de perguntas recebidas"""
@@ -1192,6 +1406,7 @@ def questions_page():
                             <a href="/">🏠 Dashboard</a>
                             <a href="/edit-rules">✏️ Regras</a>
                             <a href="/history">📊 Histórico</a>
+                            <a href="/renovar-tokens">🔄 Renovar Tokens</a>
                         </div>
                     </div>
                     
@@ -1273,6 +1488,7 @@ def edit_absence():
                     <a href="/">🏠 Dashboard</a>
                     <a href="/edit-rules">✏️ Regras</a>
                     <a href="/history">📊 Histórico</a>
+                    <a href="/renovar-tokens">🔄 Renovar Tokens</a>
                 </div>
             </div>
             
@@ -1347,6 +1563,131 @@ def add_absence():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+@app.route('/token-status')
+def token_status_page():
+    """Página detalhada do status do token"""
+    try:
+        with app.app_context():
+            # Verificar token atual
+            is_valid, message = check_token_validity()
+            
+            # Buscar logs recentes
+            user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
+            if user:
+                logs = TokenLog.query.filter_by(user_id=user.id).order_by(TokenLog.checked_at.desc()).limit(20).all()
+            else:
+                logs = []
+            
+            html = f"""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>Status do Token - Bot ML</title>
+                <meta charset="utf-8">
+                <style>
+                    body {{ font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }}
+                    .container {{ max-width: 1000px; margin: 0 auto; }}
+                    .card {{ background: #fff; padding: 20px; border-radius: 8px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
+                    .status-valid {{ color: #4CAF50; font-weight: bold; }}
+                    .status-invalid {{ color: #f44336; font-weight: bold; }}
+                    .nav a {{ display: inline-block; padding: 10px 20px; background: #2196F3; color: white; text-decoration: none; border-radius: 4px; margin-right: 10px; }}
+                    .btn {{ padding: 10px 20px; background: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer; }}
+                    .btn:hover {{ background: #45a049; }}
+                    .btn-warning {{ background: #ff9800; }}
+                    .btn-warning:hover {{ background: #e68900; }}
+                    table {{ width: 100%; border-collapse: collapse; }}
+                    th, td {{ padding: 10px; text-align: left; border-bottom: 1px solid #ddd; }}
+                    th {{ background: #f5f5f5; }}
+                    .log-valid {{ color: #4CAF50; }}
+                    .log-expired {{ color: #f44336; }}
+                    .log-error {{ color: #ff9800; }}
+                    .log-renewed {{ color: #2196F3; }}
+                </style>
+                <script>
+                    function checkToken() {{
+                        fetch('/api/token/check', {{method: 'POST'}})
+                        .then(response => response.json())
+                        .then(data => {{
+                            alert(data.message || 'Verificação concluída');
+                            window.location.reload();
+                        }})
+                        .catch(error => alert('Erro: ' + error));
+                    }}
+                </script>
+            </head>
+            <body>
+                <div class="container">
+                    <div class="card">
+                        <h1>🔑 Status do Token</h1>
+                        <div class="nav">
+                            <a href="/">🏠 Dashboard</a>
+                            <a href="/edit-rules">✏️ Regras</a>
+                            <a href="/history">📊 Histórico</a>
+                            <a href="/renovar-tokens" style="background: #ff9800;">🔄 Renovar Tokens</a>
+                        </div>
+                    </div>
+                    
+                    <div class="card">
+                        <h3>📊 Status Atual</h3>
+                        <p><strong>Status:</strong> 
+                            <span class="{'status-valid' if is_valid else 'status-invalid'}">
+                                {'✅ Válido' if is_valid else '❌ Inválido'}
+                            </span>
+                        </p>
+                        <p><strong>Token:</strong> {TOKEN_STATUS.get('current_token', '')[:30]}...</p>
+                        <p><strong>Última Verificação:</strong> {TOKEN_STATUS.get('last_check').strftime('%d/%m/%Y %H:%M:%S') if TOKEN_STATUS.get('last_check') else 'Nunca'}</p>
+                        <p><strong>Mensagem:</strong> {message}</p>
+                        <button class="btn" onclick="checkToken()">🔄 Verificar Agora</button>
+                        {'<a href="/renovar-tokens" class="btn btn-warning">🚨 Renovar Tokens</a>' if not is_valid else ''}
+                    </div>
+                    
+                    <div class="card">
+                        <h3>📋 Logs de Verificação</h3>
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Data/Hora</th>
+                                    <th>Status</th>
+                                    <th>Mensagem</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+            """
+            
+            for log in logs:
+                checked_at = format_local_time(log.checked_at)
+                date_str = checked_at.strftime('%d/%m %H:%M:%S') if checked_at else 'N/A'
+                
+                status_class = f"log-{log.token_status}"
+                status_text = {
+                    'valid': '✅ Válido',
+                    'expired': '❌ Expirado',
+                    'error': '⚠️ Erro',
+                    'renewed': '🔄 Renovado'
+                }.get(log.token_status, log.token_status)
+                
+                html += f"""
+                                <tr>
+                                    <td>{date_str}</td>
+                                    <td class="{status_class}">{status_text}</td>
+                                    <td>{log.error_message or '-'}</td>
+                                </tr>
+                """
+            
+            html += """
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </body>
+            </html>
+            """
+            
+            return html
+            
+    except Exception as e:
+        return f"Erro: {e}"
+
 # ========== INICIALIZAÇÃO ==========
 
 def start_background_tasks():
@@ -1364,7 +1705,7 @@ def start_background_tasks():
     polling_thread = threading.Thread(target=polling_loop, daemon=True)
     polling_thread.start()
     
-    print("✅ Sistema iniciado com renovação automática de token!")
+    print("✅ Sistema iniciado com interface de renovação de tokens integrada!")
 
 if __name__ == '__main__':
     start_background_tasks()
