@@ -12,7 +12,7 @@ app = Flask(__name__)
 CORS(app)
 
 # Configuração do banco SQLite em memória
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///bot_data.db'
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:////opt/render/project/src/data/bot_data.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 db = SQLAlchemy(app)
