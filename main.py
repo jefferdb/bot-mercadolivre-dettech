@@ -602,6 +602,37 @@ def monitor_questions():
 # ========== SISTEMA DE RENOVAÇÃO MANUAL DE TOKENS ==========
 # Baseado no módulo modulo_renovacao_token_manual.py - 100% FUNCIONAL
 
+# Cache para evitar processamento duplicado de códigos
+processed_codes = set()
+
+def extract_code_from_input(input_str):
+    """
+    Extrai código de autorização de string ou URL
+    Corrige problema de URL completa sendo enviada como código
+    """
+    input_str = input_str.strip()
+    
+    # Se contém 'code=', extrair da URL
+    if 'code=' in input_str:
+        try:
+            import urllib.parse
+            if input_str.startswith('http'):
+                # É uma URL completa
+                parsed = urllib.parse.urlparse(input_str)
+                params = urllib.parse.parse_qs(parsed.query)
+                code = params.get('code', [input_str])[0]
+                add_debug_log(f"🔧 Código extraído da URL: {code}")
+                return code
+            else:
+                # Pode ser só o parâmetro code=...
+                if input_str.startswith('code='):
+                    return input_str.split('code=')[1].split('&')[0]
+        except Exception as e:
+            add_debug_log(f"⚠️ Erro ao extrair código da URL: {e}")
+    
+    # Retornar como está (já é um código limpo)
+    return input_str
+
 def generate_auth_url():
     """Gera URL de autorização do Mercado Livre"""
     redirect_uri = REDIRECT_URIS[0]  # Usar webhook como padrão
@@ -623,7 +654,21 @@ def process_auth_code_flexible(code):
     Retorna: (success: bool, result: dict)
     """
     try:
-        add_debug_log(f"🔄 Processando código: {code}")
+        # CORREÇÃO: Extrair código limpo da entrada
+        clean_code = extract_code_from_input(code)
+        add_debug_log(f"🔄 Processando código: {clean_code}")
+        
+        # CORREÇÃO: Verificar se código já foi processado
+        if clean_code in processed_codes:
+            add_debug_log(f"⚠️ Código já foi processado anteriormente: {clean_code}")
+            return False, {
+                'success': False,
+                'error': 'Código já processado',
+                'message': 'Este código de autorização já foi usado. Gere um novo código.'
+            }
+        
+        # Adicionar ao cache de códigos processados
+        processed_codes.add(clean_code)
         
         for i, redirect_uri in enumerate(REDIRECT_URIS):
             try:
@@ -634,7 +679,7 @@ def process_auth_code_flexible(code):
                     'grant_type': 'authorization_code',
                     'client_id': ML_CLIENT_ID,
                     'client_secret': ML_CLIENT_SECRET,
-                    'code': code,
+                    'code': clean_code,  # CORREÇÃO: Usar código limpo
                     'redirect_uri': redirect_uri
                 }
                 
@@ -667,11 +712,14 @@ def process_auth_code_flexible(code):
                 add_debug_log(f"❌ Erro com redirect_uri {redirect_uri}: {str(e)}")
                 continue
         
+        # Remover do cache se todas as tentativas falharam
+        processed_codes.discard(clean_code)
+        
         add_debug_log("❌ Todas as tentativas falharam")
         return False, {
             'success': False,
             'error': 'Todas as tentativas falharam',
-            'message': 'Código inválido ou expirado'
+            'message': 'Código inválido, expirado ou já foi usado'
         }
         
     except Exception as e:
