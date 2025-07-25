@@ -79,113 +79,114 @@ def initialize_database():
         return
     
     try:
-        db.create_all()
-        
-        # Criar usuário padrão
-        user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
-        if not user:
-            user = User(
-                ml_user_id=ML_USER_ID,
-                access_token=ML_ACCESS_TOKEN,
-                token_expires_at=datetime.utcnow() + timedelta(hours=6)
-            )
-            db.session.add(user)
-            db.session.commit()
-        
-        # Criar regras padrão se não existirem
-        if AutoResponse.query.count() == 0:
-            default_rules = [
-                {
-                    "keywords": "preço, valor, quanto custa",
-                    "response": "O preço está na descrição do produto. Qualquer dúvida, estamos à disposição!"
-                },
-                {
-                    "keywords": "entrega, prazo, demora",
-                    "response": "O prazo de entrega aparece na página do produto. Enviamos pelos Correios com código de rastreamento."
-                },
-                {
-                    "keywords": "frete, envio, correios",
-                    "response": "O frete é calculado automaticamente pelo Mercado Livre baseado no seu CEP. Enviamos pelos Correios."
-                },
-                {
-                    "keywords": "disponível, estoque, tem",
-                    "response": "Sim, temos em estoque! Pode fazer o pedido que enviamos no mesmo dia útil."
-                },
-                {
-                    "keywords": "garantia, defeito, problema",
-                    "response": "Todos os produtos têm garantia. Em caso de defeito, trocamos ou devolvemos o dinheiro."
-                },
-                {
-                    "keywords": "pagamento, cartão, pix",
-                    "response": "Aceitamos todas as formas de pagamento do Mercado Livre: cartão, PIX, boleto."
-                },
-                {
-                    "keywords": "tamanho, medida, dimensão",
-                    "response": "As medidas estão na descrição do produto. Qualquer dúvida específica, me avise!"
-                },
-                {
-                    "keywords": "cor, cores, colorido",
-                    "response": "As cores disponíveis estão nas opções do anúncio. Se não aparecer, é porque está em falta."
-                },
-                {
-                    "keywords": "usado, novo, estado",
-                    "response": "Todos os nossos produtos são novos, lacrados e com nota fiscal."
-                },
-                {
-                    "keywords": "desconto, promoção, oferta",
-                    "response": "Este já é nosso melhor preço! Aproveite que temos frete grátis para sua região."
-                }
-            ]
+        with app.app_context():
+            db.create_all()
             
-            for rule in default_rules:
-                auto_response = AutoResponse(
-                    user_id=user.id,
-                    keywords=rule["keywords"],
-                    response_text=rule["response"],
-                    is_active=True
+            # Criar usuário padrão
+            user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
+            if not user:
+                user = User(
+                    ml_user_id=ML_USER_ID,
+                    access_token=ML_ACCESS_TOKEN,
+                    token_expires_at=datetime.utcnow() + timedelta(hours=6)
                 )
-                db.session.add(auto_response)
+                db.session.add(user)
+                db.session.commit()
             
-            db.session.commit()
-            print(f"✅ {len(default_rules)} regras padrão criadas!")
-        
-        # Criar configurações de ausência padrão
-        if AbsenceConfig.query.count() == 0:
-            absence_configs = [
-                {
-                    "name": "Horário Comercial",
-                    "message": "Obrigado pela pergunta! Nosso horário de atendimento é das 8h às 18h, de segunda a sexta. Responderemos assim que possível!",
-                    "start_time": "18:00",
-                    "end_time": "08:00",
-                    "days_of_week": "0,1,2,3,4"  # Segunda a sexta
-                },
-                {
-                    "name": "Final de Semana",
-                    "message": "Obrigado pela pergunta! Não atendemos aos finais de semana, mas responderemos na segunda-feira. Bom final de semana!",
-                    "start_time": "00:00",
-                    "end_time": "23:59",
-                    "days_of_week": "5,6"  # Sábado e domingo
-                }
-            ]
+            # Criar regras padrão se não existirem
+            if AutoResponse.query.count() == 0:
+                default_rules = [
+                    {
+                        "keywords": "preço, valor, quanto custa",
+                        "response": "O preço está na descrição do produto. Qualquer dúvida, estamos à disposição!"
+                    },
+                    {
+                        "keywords": "entrega, prazo, demora",
+                        "response": "O prazo de entrega aparece na página do produto. Enviamos pelos Correios com código de rastreamento."
+                    },
+                    {
+                        "keywords": "frete, envio, correios",
+                        "response": "O frete é calculado automaticamente pelo Mercado Livre baseado no seu CEP. Enviamos pelos Correios."
+                    },
+                    {
+                        "keywords": "disponível, estoque, tem",
+                        "response": "Sim, temos em estoque! Pode fazer o pedido que enviamos no mesmo dia útil."
+                    },
+                    {
+                        "keywords": "garantia, defeito, problema",
+                        "response": "Todos os produtos têm garantia. Em caso de defeito, trocamos ou devolvemos o dinheiro."
+                    },
+                    {
+                        "keywords": "pagamento, cartão, pix",
+                        "response": "Aceitamos todas as formas de pagamento do Mercado Livre: cartão, PIX, boleto."
+                    },
+                    {
+                        "keywords": "tamanho, medida, dimensão",
+                        "response": "As medidas estão na descrição do produto. Qualquer dúvida específica, me avise!"
+                    },
+                    {
+                        "keywords": "cor, cores, colorido",
+                        "response": "As cores disponíveis estão nas opções do anúncio. Se não aparecer, é porque está em falta."
+                    },
+                    {
+                        "keywords": "usado, novo, estado",
+                        "response": "Todos os nossos produtos são novos, lacrados e com nota fiscal."
+                    },
+                    {
+                        "keywords": "desconto, promoção, oferta",
+                        "response": "Este já é nosso melhor preço! Aproveite que temos frete grátis para sua região."
+                    }
+                ]
+                
+                for rule in default_rules:
+                    auto_response = AutoResponse(
+                        user_id=user.id,
+                        keywords=rule["keywords"],
+                        response_text=rule["response"],
+                        is_active=True
+                    )
+                    db.session.add(auto_response)
+                
+                db.session.commit()
+                print(f"✅ {len(default_rules)} regras padrão criadas!")
             
-            for config in absence_configs:
-                absence = AbsenceConfig(
-                    user_id=user.id,
-                    name=config["name"],
-                    message=config["message"],
-                    start_time=config["start_time"],
-                    end_time=config["end_time"],
-                    days_of_week=config["days_of_week"],
-                    is_active=True
-                )
-                db.session.add(absence)
+            # Criar configurações de ausência padrão
+            if AbsenceConfig.query.count() == 0:
+                absence_configs = [
+                    {
+                        "name": "Horário Comercial",
+                        "message": "Obrigado pela pergunta! Nosso horário de atendimento é das 8h às 18h, de segunda a sexta. Responderemos assim que possível!",
+                        "start_time": "18:00",
+                        "end_time": "08:00",
+                        "days_of_week": "0,1,2,3,4"  # Segunda a sexta
+                    },
+                    {
+                        "name": "Final de Semana",
+                        "message": "Obrigado pela pergunta! Não atendemos aos finais de semana, mas responderemos na segunda-feira. Bom final de semana!",
+                        "start_time": "00:00",
+                        "end_time": "23:59",
+                        "days_of_week": "5,6"  # Sábado e domingo
+                    }
+                ]
+                
+                for config in absence_configs:
+                    absence = AbsenceConfig(
+                        user_id=user.id,
+                        name=config["name"],
+                        message=config["message"],
+                        start_time=config["start_time"],
+                        end_time=config["end_time"],
+                        days_of_week=config["days_of_week"],
+                        is_active=True
+                    )
+                    db.session.add(absence)
+                
+                db.session.commit()
+                print(f"✅ {len(absence_configs)} configurações de ausência criadas!")
             
-            db.session.commit()
-            print(f"✅ {len(absence_configs)} configurações de ausência criadas!")
-        
-        _initialized = True
-        print("✅ Banco de dados inicializado com sucesso!")
-        
+            _initialized = True
+            print("✅ Banco de dados inicializado com sucesso!")
+            
     except Exception as e:
         print(f"❌ Erro ao inicializar banco: {e}")
 
@@ -279,8 +280,6 @@ def fetch_unanswered_questions():
 # Função para processar perguntas automaticamente
 def process_questions():
     try:
-        initialize_database()  # Garantir que banco está inicializado
-        
         questions = fetch_unanswered_questions()
         
         if not questions:
@@ -338,7 +337,8 @@ def process_questions():
 def monitor_questions():
     while True:
         try:
-            process_questions()
+            with app.app_context():
+                process_questions()
             time.sleep(60)  # Verificar a cada 60 segundos
         except Exception as e:
             print(f"❌ Erro no monitoramento: {e}")
@@ -347,7 +347,8 @@ def monitor_questions():
 # Rotas da aplicação
 @app.route('/')
 def dashboard():
-    initialize_database()  # Garantir que banco está inicializado
+    if not _initialized:
+        initialize_database()
     
     user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
     if not user:
@@ -464,7 +465,8 @@ def dashboard():
 
 @app.route('/rules')
 def rules_page():
-    initialize_database()
+    if not _initialized:
+        initialize_database()
     
     user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
     if not user:
@@ -526,7 +528,8 @@ def rules_page():
 
 @app.route('/questions')
 def questions_page():
-    initialize_database()
+    if not _initialized:
+        initialize_database()
     
     user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
     if not user:
@@ -590,7 +593,8 @@ def questions_page():
 
 @app.route('/absence')
 def absence_page():
-    initialize_database()
+    if not _initialized:
+        initialize_database()
     
     user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
     if not user:
@@ -671,7 +675,7 @@ def webhook_ml():
             print(f"📨 Notificação de pergunta recebida: {data}")
             
             # Processar perguntas imediatamente
-            threading.Thread(target=process_questions, daemon=True).start()
+            threading.Thread(target=lambda: process_questions(), daemon=True).start()
             
             return jsonify({"status": "ok", "message": "notificação processada"})
         
@@ -684,7 +688,8 @@ def webhook_ml():
 # APIs para dados
 @app.route('/api/ml/rules')
 def api_rules():
-    initialize_database()
+    if not _initialized:
+        initialize_database()
     
     user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
     if not user:
@@ -701,7 +706,8 @@ def api_rules():
 
 @app.route('/api/ml/questions/recent')
 def api_recent_questions():
-    initialize_database()
+    if not _initialized:
+        initialize_database()
     
     user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
     if not user:
@@ -720,7 +726,8 @@ def api_recent_questions():
 
 @app.route('/api/ml/absence')
 def api_absence():
-    initialize_database()
+    if not _initialized:
+        initialize_database()
     
     user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
     if not user:
@@ -738,19 +745,17 @@ def api_absence():
         "active": config.is_active
     } for config in configs])
 
-# Inicializar banco na primeira requisição
-@app.before_first_request
-def before_first_request():
-    initialize_database()
-    
-    # Iniciar monitoramento em thread separada
-    monitor_thread = threading.Thread(target=monitor_questions, daemon=True)
-    monitor_thread.start()
-    print("✅ Monitoramento de perguntas iniciado!")
-    
-    print("🚀 Bot do Mercado Livre iniciado com sucesso!")
-    print(f"🔑 Token: {ML_ACCESS_TOKEN[:20]}...")
-    print(f"👤 User ID: {ML_USER_ID}")
+# Inicializar aplicação
+initialize_database()
+
+# Iniciar monitoramento
+monitor_thread = threading.Thread(target=monitor_questions, daemon=True)
+monitor_thread.start()
+print("✅ Monitoramento de perguntas iniciado!")
+
+print("🚀 Bot do Mercado Livre iniciado com sucesso!")
+print(f"🔑 Token: {ML_ACCESS_TOKEN[:20]}...")
+print(f"👤 User ID: {ML_USER_ID}")
 
 if __name__ == '__main__':
     # Executar aplicação
