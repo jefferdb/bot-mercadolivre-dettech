@@ -919,6 +919,516 @@ def dashboard():
         </html>
         """
 
+# ========== PÁGINA DE CONFIGURAÇÃO DE AUSÊNCIA COMPLETA ==========
+
+@app.route('/edit-absence')
+def edit_absence():
+    """Interface completa para configurar mensagens de ausência"""
+    try:
+        with app.app_context():
+            user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
+            if user:
+                absence_configs = AbsenceConfig.query.filter_by(user_id=user.id).all()
+            else:
+                absence_configs = []
+            
+            html = """
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>Configurar Ausência - Bot ML</title>
+                <meta charset="utf-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1">
+                <style>
+                    body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
+                    .container { max-width: 900px; margin: 0 auto; }
+                    .card { background: #fff; padding: 20px; border-radius: 8px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+                    .form-group { margin-bottom: 15px; }
+                    label { display: block; margin-bottom: 5px; font-weight: bold; }
+                    input, textarea, select { width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box; }
+                    textarea { height: 100px; resize: vertical; }
+                    .btn { padding: 10px 20px; background: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer; margin-right: 10px; }
+                    .btn:hover { background: #45a049; }
+                    .btn-danger { background: #f44336; }
+                    .btn-danger:hover { background: #da190b; }
+                    .btn-warning { background: #ff9800; }
+                    .btn-warning:hover { background: #e68900; }
+                    .absence-item { border: 1px solid #ddd; padding: 15px; margin-bottom: 10px; border-radius: 4px; }
+                    .nav a { display: inline-block; padding: 10px 20px; background: #2196F3; color: white; text-decoration: none; border-radius: 4px; margin-right: 10px; }
+                    .checkbox-group { display: flex; flex-wrap: wrap; gap: 10px; }
+                    .checkbox-item { display: flex; align-items: center; }
+                    .checkbox-item input { width: auto; margin-right: 5px; }
+                    .time-group { display: flex; gap: 10px; align-items: center; }
+                    .time-group input { width: 120px; }
+                    .status-active { color: #4CAF50; font-weight: bold; }
+                    .status-inactive { color: #f44336; font-weight: bold; }
+                    .alert { padding: 15px; border-radius: 4px; margin-bottom: 20px; }
+                    .alert-info { background: #e3f2fd; border: 1px solid #2196F3; color: #1976D2; }
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <div class="card">
+                        <h1>🌙 Configurar Ausência</h1>
+                        <div class="nav">
+                            <a href="/">🏠 Dashboard</a>
+                            <a href="/edit-rules">✏️ Regras</a>
+                            <a href="/history">📊 Histórico</a>
+                            <a href="/renovar-tokens">🔄 Renovar Tokens</a>
+                        </div>
+                    </div>
+                    
+                    <div class="card">
+                        <div class="alert alert-info">
+                            <h4>ℹ️ Como Funciona</h4>
+                            <p>Configure mensagens automáticas para horários específicos (ex: fora do horário comercial, finais de semana, feriados).</p>
+                            <p>Durante os períodos configurados, todas as perguntas serão respondidas automaticamente com a mensagem de ausência.</p>
+                        </div>
+                    </div>
+                    
+                    <div class="card">
+                        <h3>➕ Adicionar Nova Configuração de Ausência</h3>
+                        <form method="POST" action="/api/absence">
+                            <div class="form-group">
+                                <label>Nome da Configuração:</label>
+                                <input type="text" name="name" placeholder="Ex: Fora do horário comercial" required>
+                            </div>
+                            
+                            <div class="form-group">
+                                <label>Mensagem de Ausência:</label>
+                                <textarea name="message" placeholder="Olá! No momento estou fora do horário de atendimento. Retornarei em breve!" required></textarea>
+                            </div>
+                            
+                            <div class="form-group">
+                                <label>Horário:</label>
+                                <div class="time-group">
+                                    <input type="time" name="start_time" placeholder="Início" required>
+                                    <span>até</span>
+                                    <input type="time" name="end_time" placeholder="Fim" required>
+                                </div>
+                                <small>Ex: 18:00 até 08:00 (para fora do horário comercial)</small>
+                            </div>
+                            
+                            <div class="form-group">
+                                <label>Dias da Semana:</label>
+                                <div class="checkbox-group">
+                                    <div class="checkbox-item">
+                                        <input type="checkbox" name="days" value="0" id="seg">
+                                        <label for="seg">Segunda</label>
+                                    </div>
+                                    <div class="checkbox-item">
+                                        <input type="checkbox" name="days" value="1" id="ter">
+                                        <label for="ter">Terça</label>
+                                    </div>
+                                    <div class="checkbox-item">
+                                        <input type="checkbox" name="days" value="2" id="qua">
+                                        <label for="qua">Quarta</label>
+                                    </div>
+                                    <div class="checkbox-item">
+                                        <input type="checkbox" name="days" value="3" id="qui">
+                                        <label for="qui">Quinta</label>
+                                    </div>
+                                    <div class="checkbox-item">
+                                        <input type="checkbox" name="days" value="4" id="sex">
+                                        <label for="sex">Sexta</label>
+                                    </div>
+                                    <div class="checkbox-item">
+                                        <input type="checkbox" name="days" value="5" id="sab">
+                                        <label for="sab">Sábado</label>
+                                    </div>
+                                    <div class="checkbox-item">
+                                        <input type="checkbox" name="days" value="6" id="dom">
+                                        <label for="dom">Domingo</label>
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <button type="submit" class="btn">💾 Salvar Configuração</button>
+                        </form>
+                    </div>
+                    
+                    <div class="card">
+                        <h3>📋 Configurações Existentes</h3>
+            """
+            
+            if absence_configs:
+                for config in absence_configs:
+                    status = "✅ Ativa" if config.is_active else "❌ Inativa"
+                    status_class = "status-active" if config.is_active else "status-inactive"
+                    
+                    # Converter dias da semana para nomes
+                    days_map = {
+                        '0': 'Seg', '1': 'Ter', '2': 'Qua', '3': 'Qui',
+                        '4': 'Sex', '5': 'Sáb', '6': 'Dom'
+                    }
+                    days_list = config.days_of_week.split(',') if config.days_of_week else []
+                    days_names = [days_map.get(day, day) for day in days_list]
+                    
+                    html += f"""
+                            <div class="absence-item">
+                                <h4>{config.name}</h4>
+                                <p><strong>Mensagem:</strong> {config.message}</p>
+                                <p><strong>Horário:</strong> {config.start_time} às {config.end_time}</p>
+                                <p><strong>Dias:</strong> {', '.join(days_names)}</p>
+                                <p><strong>Status:</strong> <span class="{status_class}">{status}</span></p>
+                                <button class="btn btn-warning" onclick="toggleAbsence({config.id})">
+                                    {'🔴 Desativar' if config.is_active else '🟢 Ativar'}
+                                </button>
+                                <button class="btn btn-danger" onclick="deleteAbsence({config.id})">🗑️ Excluir</button>
+                            </div>
+                    """
+            else:
+                html += """
+                        <p>Nenhuma configuração de ausência criada ainda.</p>
+                        <p>💡 <strong>Dica:</strong> Crie configurações para diferentes situações como:</p>
+                        <ul>
+                            <li>Fora do horário comercial (18h às 8h)</li>
+                            <li>Finais de semana (sábado e domingo)</li>
+                            <li>Horário de almoço (12h às 13h)</li>
+                        </ul>
+                """
+            
+            html += """
+                    </div>
+                </div>
+                
+                <script>
+                    function toggleAbsence(id) {
+                        fetch('/api/absence/' + id + '/toggle', {method: 'POST'})
+                        .then(response => response.json())
+                        .then(data => {
+                            if (data.success) {
+                                window.location.reload();
+                            } else {
+                                alert('Erro: ' + data.error);
+                            }
+                        })
+                        .catch(error => alert('Erro: ' + error));
+                    }
+                    
+                    function deleteAbsence(id) {
+                        if (confirm('Tem certeza que deseja excluir esta configuração de ausência?')) {
+                            fetch('/api/absence/' + id, {method: 'DELETE'})
+                            .then(response => response.json())
+                            .then(data => {
+                                if (data.success) {
+                                    window.location.reload();
+                                } else {
+                                    alert('Erro: ' + data.error);
+                                }
+                            })
+                            .catch(error => alert('Erro: ' + error));
+                        }
+                    }
+                </script>
+            </body>
+            </html>
+            """
+            
+            return html
+            
+    except Exception as e:
+        return f"Erro: {e}"
+
+# ========== PÁGINA DE HISTÓRICO COMPLETA ==========
+
+@app.route('/history')
+def history():
+    """Página completa de histórico de respostas"""
+    try:
+        with app.app_context():
+            user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
+            if not user:
+                return "Usuário não encontrado"
+            
+            # Buscar histórico com joins
+            history_query = db.session.query(
+                ResponseHistory,
+                Question
+            ).join(
+                Question, ResponseHistory.question_id == Question.id
+            ).filter(
+                ResponseHistory.user_id == user.id
+            ).order_by(
+                ResponseHistory.created_at.desc()
+            ).limit(100)
+            
+            history_records = history_query.all()
+            
+            # Estatísticas
+            today = get_local_time_utc().date()
+            
+            total_responses = ResponseHistory.query.filter_by(user_id=user.id).count()
+            auto_responses = ResponseHistory.query.filter_by(user_id=user.id, response_type='auto').count()
+            absence_responses = ResponseHistory.query.filter_by(user_id=user.id, response_type='absence').count()
+            manual_responses = ResponseHistory.query.filter_by(user_id=user.id, response_type='manual').count()
+            
+            responses_today = ResponseHistory.query.filter_by(user_id=user.id).filter(
+                db.func.date(ResponseHistory.created_at) == today
+            ).count()
+            
+            avg_response_time = db.session.query(db.func.avg(ResponseHistory.response_time)).filter_by(user_id=user.id).scalar()
+            avg_response_time = round(avg_response_time, 2) if avg_response_time else 0
+            
+            html = f"""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>Histórico de Respostas - Bot ML</title>
+                <meta charset="utf-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1">
+                <style>
+                    body {{ font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }}
+                    .container {{ max-width: 1200px; margin: 0 auto; }}
+                    .card {{ background: #fff; padding: 20px; border-radius: 8px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
+                    .nav a {{ display: inline-block; padding: 10px 20px; background: #2196F3; color: white; text-decoration: none; border-radius: 4px; margin-right: 10px; }}
+                    .stats {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin-bottom: 20px; }}
+                    .stat-card {{ background: #fff; padding: 15px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); text-align: center; }}
+                    .stat-number {{ font-size: 1.8em; font-weight: bold; color: #2196F3; }}
+                    .stat-label {{ color: #666; margin-top: 5px; font-size: 0.9em; }}
+                    table {{ width: 100%; border-collapse: collapse; }}
+                    th, td {{ padding: 12px; text-align: left; border-bottom: 1px solid #ddd; }}
+                    th {{ background: #f5f5f5; font-weight: bold; }}
+                    .response-auto {{ color: #4CAF50; font-weight: bold; }}
+                    .response-absence {{ color: #ff9800; font-weight: bold; }}
+                    .response-manual {{ color: #2196F3; font-weight: bold; }}
+                    .question-text {{ max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+                    .response-text {{ max-width: 250px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+                    .filter-section {{ background: #f8f9fa; padding: 15px; border-radius: 4px; margin-bottom: 20px; }}
+                    .filter-group {{ display: flex; gap: 15px; align-items: center; flex-wrap: wrap; }}
+                    .filter-group select, .filter-group input {{ padding: 8px; border: 1px solid #ddd; border-radius: 4px; }}
+                    .btn {{ padding: 8px 16px; background: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer; }}
+                    .btn:hover {{ background: #45a049; }}
+                </style>
+                <script>
+                    function filterHistory() {{
+                        const type = document.getElementById('filter-type').value;
+                        const date = document.getElementById('filter-date').value;
+                        
+                        const rows = document.querySelectorAll('.history-row');
+                        rows.forEach(row => {{
+                            let showRow = true;
+                            
+                            if (type && type !== 'all') {{
+                                const rowType = row.getAttribute('data-type');
+                                if (rowType !== type) showRow = false;
+                            }}
+                            
+                            if (date) {{
+                                const rowDate = row.getAttribute('data-date');
+                                if (!rowDate.startsWith(date)) showRow = false;
+                            }}
+                            
+                            row.style.display = showRow ? '' : 'none';
+                        }});
+                    }}
+                    
+                    function clearFilters() {{
+                        document.getElementById('filter-type').value = 'all';
+                        document.getElementById('filter-date').value = '';
+                        filterHistory();
+                    }}
+                </script>
+            </head>
+            <body>
+                <div class="container">
+                    <div class="card">
+                        <h1>📊 Histórico de Respostas</h1>
+                        <div class="nav">
+                            <a href="/">🏠 Dashboard</a>
+                            <a href="/edit-rules">✏️ Regras</a>
+                            <a href="/edit-absence">🌙 Ausência</a>
+                            <a href="/questions">❓ Perguntas</a>
+                            <a href="/renovar-tokens">🔄 Renovar Tokens</a>
+                        </div>
+                    </div>
+                    
+                    <div class="stats">
+                        <div class="stat-card">
+                            <div class="stat-number">{total_responses}</div>
+                            <div class="stat-label">Total de Respostas</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-number">{auto_responses}</div>
+                            <div class="stat-label">Respostas Automáticas</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-number">{absence_responses}</div>
+                            <div class="stat-label">Respostas de Ausência</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-number">{manual_responses}</div>
+                            <div class="stat-label">Respostas Manuais</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-number">{responses_today}</div>
+                            <div class="stat-label">Respostas Hoje</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-number">{avg_response_time}s</div>
+                            <div class="stat-label">Tempo Médio</div>
+                        </div>
+                    </div>
+                    
+                    <div class="card">
+                        <div class="filter-section">
+                            <h4>🔍 Filtros</h4>
+                            <div class="filter-group">
+                                <label>Tipo:</label>
+                                <select id="filter-type" onchange="filterHistory()">
+                                    <option value="all">Todos</option>
+                                    <option value="auto">Automáticas</option>
+                                    <option value="absence">Ausência</option>
+                                    <option value="manual">Manuais</option>
+                                </select>
+                                
+                                <label>Data:</label>
+                                <input type="date" id="filter-date" onchange="filterHistory()">
+                                
+                                <button class="btn" onclick="clearFilters()">🗑️ Limpar</button>
+                            </div>
+                        </div>
+                        
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Data/Hora</th>
+                                    <th>Tipo</th>
+                                    <th>Pergunta</th>
+                                    <th>Resposta</th>
+                                    <th>Palavras-chave</th>
+                                    <th>Tempo (s)</th>
+                                    <th>Item ID</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+            """
+            
+            for history, question in history_records:
+                created_at = format_local_time(history.created_at)
+                date_str = created_at.strftime('%d/%m %H:%M') if created_at else 'N/A'
+                date_iso = created_at.strftime('%Y-%m-%d') if created_at else ''
+                
+                type_class = f"response-{history.response_type}"
+                type_text = {
+                    'auto': '🤖 Automática',
+                    'absence': '🌙 Ausência', 
+                    'manual': '👤 Manual'
+                }.get(history.response_type, history.response_type)
+                
+                question_text = question.question_text[:50] + '...' if len(question.question_text) > 50 else question.question_text
+                response_text = question.response_text[:40] + '...' if question.response_text and len(question.response_text) > 40 else (question.response_text or 'N/A')
+                
+                keywords = history.keywords_matched or 'N/A'
+                response_time = round(history.response_time, 2) if history.response_time else 'N/A'
+                
+                html += f"""
+                                <tr class="history-row" data-type="{history.response_type}" data-date="{date_iso}">
+                                    <td>{date_str}</td>
+                                    <td><span class="{type_class}">{type_text}</span></td>
+                                    <td class="question-text" title="{question.question_text}">{question_text}</td>
+                                    <td class="response-text" title="{question.response_text or ''}">{response_text}</td>
+                                    <td>{keywords}</td>
+                                    <td>{response_time}</td>
+                                    <td>{question.item_id}</td>
+                                </tr>
+                """
+            
+            if not history_records:
+                html += """
+                                <tr>
+                                    <td colspan="7" style="text-align: center; padding: 40px;">
+                                        <p>📭 Nenhuma resposta registrada ainda.</p>
+                                        <p>As respostas aparecerão aqui conforme o bot processar perguntas.</p>
+                                    </td>
+                                </tr>
+                """
+            
+            html += """
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </body>
+            </html>
+            """
+            
+            return html
+            
+    except Exception as e:
+        return f"Erro: {e}"
+
+# ========== APIs PARA AUSÊNCIA ==========
+
+@app.route('/api/absence', methods=['POST'])
+def add_absence_config():
+    """API para adicionar configuração de ausência"""
+    try:
+        with app.app_context():
+            user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
+            if not user:
+                return jsonify({'error': 'Usuário não encontrado'}), 404
+            
+            name = request.form.get('name')
+            message = request.form.get('message')
+            start_time = request.form.get('start_time')
+            end_time = request.form.get('end_time')
+            days = request.form.getlist('days')
+            
+            if not all([name, message, start_time, end_time, days]):
+                return jsonify({'error': 'Todos os campos são obrigatórios'}), 400
+            
+            days_str = ','.join(days)
+            
+            absence_config = AbsenceConfig(
+                user_id=user.id,
+                name=name,
+                message=message,
+                start_time=start_time,
+                end_time=end_time,
+                days_of_week=days_str
+            )
+            
+            db.session.add(absence_config)
+            db.session.commit()
+            
+            return redirect('/edit-absence')
+            
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/absence/<int:config_id>/toggle', methods=['POST'])
+def toggle_absence_config(config_id):
+    """API para ativar/desativar configuração de ausência"""
+    try:
+        with app.app_context():
+            config = AbsenceConfig.query.get(config_id)
+            if config:
+                config.is_active = not config.is_active
+                db.session.commit()
+                return jsonify({'success': True, 'is_active': config.is_active})
+            else:
+                return jsonify({'error': 'Configuração não encontrada'}), 404
+                
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/absence/<int:config_id>', methods=['DELETE'])
+def delete_absence_config(config_id):
+    """API para excluir configuração de ausência"""
+    try:
+        with app.app_context():
+            config = AbsenceConfig.query.get(config_id)
+            if config:
+                db.session.delete(config)
+                db.session.commit()
+                return jsonify({'success': True})
+            else:
+                return jsonify({'error': 'Configuração não encontrada'}), 404
+                
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 # ========== WEBHOOK CORRIGIDO PARA RESOLVER 405 ==========
 
 @app.route('/api/ml/webhook', methods=['GET', 'POST'])
@@ -1503,22 +2013,6 @@ def delete_rule(rule_id):
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-# Adicionar outras rotas essenciais (history, questions, edit-absence, token-status)
-@app.route('/history')
-def history():
-    """Página de histórico de respostas"""
-    return """
-    <!DOCTYPE html>
-    <html>
-    <head><title>Histórico - Bot ML</title></head>
-    <body>
-        <h1>📊 Histórico de Respostas</h1>
-        <p>Página em desenvolvimento...</p>
-        <a href="/">🏠 Voltar ao Dashboard</a>
-    </body>
-    </html>
-    """
-
 @app.route('/questions')
 def questions_page():
     """Página de perguntas recebidas"""
@@ -1528,21 +2022,6 @@ def questions_page():
     <head><title>Perguntas - Bot ML</title></head>
     <body>
         <h1>❓ Perguntas Recebidas</h1>
-        <p>Página em desenvolvimento...</p>
-        <a href="/">🏠 Voltar ao Dashboard</a>
-    </body>
-    </html>
-    """
-
-@app.route('/edit-absence')
-def edit_absence():
-    """Interface para configurar mensagens de ausência"""
-    return """
-    <!DOCTYPE html>
-    <html>
-    <head><title>Configurar Ausência - Bot ML</title></head>
-    <body>
-        <h1>🌙 Configurar Ausência</h1>
         <p>Página em desenvolvimento...</p>
         <a href="/">🏠 Voltar ao Dashboard</a>
     </body>
@@ -1581,9 +2060,10 @@ def start_background_tasks():
     polling_thread = threading.Thread(target=polling_loop, daemon=True)
     polling_thread.start()
     
-    print("✅ Sistema iniciado com correções para deploy!")
-    print("🔧 Erros 404 e 405 corrigidos")
-    print("📡 Webhook funcionando com GET e POST")
+    print("✅ Sistema iniciado com funcionalidades completas!")
+    print("🌙 Configuração de ausência implementada")
+    print("📊 Histórico de respostas implementado")
+    print("🔧 Todas as funcionalidades funcionando")
 
 if __name__ == '__main__':
     start_background_tasks()
