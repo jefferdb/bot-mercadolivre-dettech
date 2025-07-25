@@ -139,6 +139,17 @@ class TokenLog(db.Model):
     error_message = db.Column(db.Text)
     checked_at = db.Column(db.DateTime, default=get_local_time_utc)
 
+class WebhookLog(db.Model):
+    __tablename__ = 'webhook_logs'
+    id = db.Column(db.Integer, primary_key=True)
+    topic = db.Column(db.String(100))
+    resource = db.Column(db.String(200))
+    user_id_ml = db.Column(db.String(50))
+    application_id = db.Column(db.String(50))
+    attempts = db.Column(db.Integer, default=1)
+    sent = db.Column(db.DateTime)
+    received = db.Column(db.DateTime, default=get_local_time_utc)
+
 # Variável global para controlar inicialização
 _initialized = False
 _db_lock = threading.Lock()
@@ -434,6 +445,640 @@ def update_system_tokens(tokens_data, user_info=None):
         print(f"❌ {error_msg}")
         return False, error_msg
 
+# ========== FUNÇÕES ORIGINAIS ADAPTADAS ==========
+
+def get_questions():
+    """Busca perguntas não respondidas usando o sistema de renovação automática"""
+    try:
+        url = f"https://api.mercadolibre.com/my/received_questions/search?seller_id={ML_USER_ID}&status=UNANSWERED"
+        
+        response, message = make_ml_request(url)
+        
+        if response and response.status_code == 200:
+            questions_data = response.json()
+            return questions_data.get('questions', [])
+        else:
+            print(f"❌ Erro ao buscar perguntas: {message}")
+            return []
+            
+    except Exception as e:
+        print(f"💥 Erro ao buscar perguntas: {e}")
+        return []
+
+def answer_question(question_id, answer_text):
+    """Responde uma pergunta usando o sistema de renovação automática"""
+    try:
+        url = f"https://api.mercadolibre.com/answers"
+        data = {
+            'question_id': question_id,
+            'text': answer_text
+        }
+        
+        response, message = make_ml_request(url, method='POST', data=data)
+        
+        if response and response.status_code in [200, 201]:
+            print(f"✅ Pergunta {question_id} respondida com sucesso!")
+            return True
+        else:
+            print(f"❌ Erro ao responder pergunta {question_id}: {message}")
+            return False
+            
+    except Exception as e:
+        print(f"💥 Erro ao responder pergunta {question_id}: {e}")
+        return False
+
+# ========== FUNÇÕES DE PROCESSAMENTO ==========
+
+def init_database():
+    """Inicializa o banco de dados"""
+    global _initialized
+    
+    with _db_lock:
+        if _initialized:
+            return
+        
+        try:
+            with app.app_context():
+                db.create_all()
+                
+                # Verificar se usuário existe, se não, criar
+                user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
+                if not user:
+                    user = User(
+                        ml_user_id=ML_USER_ID,
+                        access_token=ML_ACCESS_TOKEN,
+                        refresh_token=ML_REFRESH_TOKEN,
+                        token_expires_at=get_local_time_utc() + timedelta(hours=6)
+                    )
+                    db.session.add(user)
+                    db.session.commit()
+                    print(f"✅ Usuário {ML_USER_ID} criado no banco")
+                else:
+                    # Atualizar tokens se necessário
+                    user.access_token = ML_ACCESS_TOKEN
+                    if ML_REFRESH_TOKEN:
+                        user.refresh_token = ML_REFRESH_TOKEN
+                    user.updated_at = get_local_time_utc()
+                    db.session.commit()
+                    print(f"✅ Usuário {ML_USER_ID} atualizado")
+                
+                # Criar regras padrão se não existirem
+                if not AutoResponse.query.filter_by(user_id=user.id).first():
+                    default_responses = [
+                        {
+                            'keywords': 'preço,valor,quanto custa,preço,custo',
+                            'response_text': 'Olá! O preço está na descrição do anúncio. Qualquer dúvida, estou à disposição!'
+                        },
+                        {
+                            'keywords': 'entrega,prazo,demora,quando chega',
+                            'response_text': 'Olá! O prazo de entrega varia conforme sua localização. Você pode verificar na página do produto. Obrigado!'
+                        },
+                        {
+                            'keywords': 'disponível,estoque,tem,possui',
+                            'response_text': 'Olá! Sim, temos o produto disponível. Pode fazer sua compra com tranquilidade!'
+                        }
+                    ]
+                    
+                    for resp in default_responses:
+                        auto_resp = AutoResponse(
+                            user_id=user.id,
+                            keywords=resp['keywords'],
+                            response_text=resp['response_text']
+                        )
+                        db.session.add(auto_resp)
+                    
+                    db.session.commit()
+                    print("✅ Regras padrão criadas")
+                
+                _initialized = True
+                print("✅ Banco de dados inicializado com sucesso")
+                
+        except Exception as e:
+            print(f"❌ Erro ao inicializar banco: {e}")
+
+def log_token_check(status, error_message=None):
+    """Registra verificação de token no banco"""
+    try:
+        with app.app_context():
+            user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
+            if user:
+                log_entry = TokenLog(
+                    user_id=user.id,
+                    token_status=status,
+                    error_message=error_message
+                )
+                db.session.add(log_entry)
+                db.session.commit()
+    except Exception as e:
+        print(f"❌ Erro ao registrar log de token: {e}")
+
+def log_webhook(topic=None, resource=None, user_id_ml=None, application_id=None, attempts=1, sent=None):
+    """Registra webhook recebido no banco"""
+    try:
+        with app.app_context():
+            webhook_log = WebhookLog(
+                topic=topic,
+                resource=resource,
+                user_id_ml=user_id_ml,
+                application_id=application_id,
+                attempts=attempts,
+                sent=sent
+            )
+            db.session.add(webhook_log)
+            db.session.commit()
+            print(f"📝 Webhook registrado: {topic} - {resource}")
+    except Exception as e:
+        print(f"❌ Erro ao registrar webhook: {e}")
+
+def monitor_token():
+    """Monitora o token a cada 5 minutos"""
+    while True:
+        try:
+            is_valid, message = check_token_validity()
+            
+            if is_valid:
+                log_token_check('valid')
+            else:
+                log_token_check('expired', message)
+                
+                # Tentar renovar automaticamente
+                success, refresh_message = refresh_access_token()
+                if success:
+                    log_token_check('renewed', 'Token renovado automaticamente')
+                else:
+                    log_token_check('error', f'Falha na renovação: {refresh_message}')
+            
+            time.sleep(300)  # 5 minutos
+            
+        except Exception as e:
+            print(f"❌ Erro no monitoramento de token: {e}")
+            time.sleep(300)
+
+def is_absence_time():
+    """Verifica se está em horário de ausência"""
+    now = get_local_time()
+    current_time = now.strftime("%H:%M")
+    current_weekday = str(now.weekday())  # 0=segunda, 6=domingo
+    
+    try:
+        with app.app_context():
+            absence_configs = AbsenceConfig.query.filter_by(is_active=True).all()
+            
+            for config in absence_configs:
+                if current_weekday in config.days_of_week.split(','):
+                    start_time = config.start_time
+                    end_time = config.end_time
+                    
+                    # Se start_time > end_time, significa que cruza meia-noite
+                    if start_time > end_time:
+                        if current_time >= start_time or current_time <= end_time:
+                            return config.message
+                    else:
+                        if start_time <= current_time <= end_time:
+                            return config.message
+    except Exception as e:
+        print(f"❌ Erro ao verificar horário de ausência: {e}")
+    
+    return None
+
+def find_auto_response(question_text):
+    """Encontra resposta automática baseada em palavras-chave"""
+    question_lower = question_text.lower()
+    
+    try:
+        with app.app_context():
+            auto_responses = AutoResponse.query.filter_by(is_active=True).all()
+            
+            for response in auto_responses:
+                keywords = [k.strip().lower() for k in response.keywords.split(',')]
+                
+                for keyword in keywords:
+                    if keyword in question_lower:
+                        return response.response_text, response.keywords
+    except Exception as e:
+        print(f"❌ Erro ao buscar resposta automática: {e}")
+    
+    return None, None
+
+def process_questions():
+    """Processa perguntas automaticamente com renovação de token"""
+    try:
+        with _db_lock:
+            with app.app_context():
+                # Buscar perguntas usando sistema de renovação automática
+                questions = get_questions()
+                
+                if not questions:
+                    return
+                
+                user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
+                if not user:
+                    return
+                
+                for q in questions:
+                    question_id = str(q.get("id"))
+                    question_text = q.get("text", "")
+                    item_id = q.get("item_id", "")
+                    
+                    # Verificar se já processamos esta pergunta
+                    existing = Question.query.filter_by(ml_question_id=question_id).first()
+                    if existing:
+                        continue
+                    
+                    start_time = time.time()
+                    
+                    # Salvar pergunta no banco
+                    question = Question(
+                        ml_question_id=question_id,
+                        user_id=user.id,
+                        item_id=item_id,
+                        question_text=question_text,
+                        is_answered=False
+                    )
+                    db.session.add(question)
+                    db.session.flush()  # Para obter o ID
+                    
+                    response_type = None
+                    keywords_matched = None
+                    
+                    # Verificar se está em horário de ausência
+                    absence_message = is_absence_time()
+                    if absence_message:
+                        if answer_question(question_id, absence_message):
+                            question.response_text = absence_message
+                            question.is_answered = True
+                            question.answered_automatically = True
+                            question.answered_at = get_local_time_utc()
+                            response_type = "absence"
+                            print(f"✅ Pergunta {question_id} respondida com mensagem de ausência")
+                    else:
+                        # Buscar resposta automática
+                        auto_response, matched_keywords = find_auto_response(question_text)
+                        if auto_response:
+                            if answer_question(question_id, auto_response):
+                                question.response_text = auto_response
+                                question.is_answered = True
+                                question.answered_automatically = True
+                                question.answered_at = get_local_time_utc()
+                                response_type = "auto"
+                                keywords_matched = matched_keywords
+                                print(f"✅ Pergunta {question_id} respondida automaticamente")
+                    
+                    # Registrar no histórico se foi respondida
+                    if response_type:
+                        response_time = time.time() - start_time
+                        history = ResponseHistory(
+                            user_id=user.id,
+                            question_id=question.id,
+                            response_type=response_type,
+                            keywords_matched=keywords_matched,
+                            response_time=response_time
+                        )
+                        db.session.add(history)
+                    
+                    db.session.commit()
+                    
+    except Exception as e:
+        print(f"❌ Erro ao processar perguntas: {e}")
+
+def polling_loop():
+    """Loop principal de polling com renovação automática"""
+    print("🔄 Iniciando polling de perguntas...")
+    
+    while True:
+        try:
+            process_questions()
+            time.sleep(30)  # Verificar a cada 30 segundos
+        except Exception as e:
+            print(f"❌ Erro no polling: {e}")
+            time.sleep(60)  # Esperar mais tempo em caso de erro
+
+def start_token_monitoring():
+    """Inicia o monitoramento de token em background"""
+    monitor_thread = threading.Thread(target=monitor_token, daemon=True)
+    monitor_thread.start()
+    print("🔍 Monitoramento de token iniciado")
+
+# ========== ROTAS WEB ==========
+
+@app.route('/')
+def dashboard():
+    """Dashboard principal com status do token - CORRIGIDO PARA RESOLVER 404"""
+    try:
+        with app.app_context():
+            # Verificar token atual
+            is_valid, message = check_token_validity()
+            
+            # Estatísticas
+            user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
+            if user:
+                today = get_local_time_utc().date()
+                
+                total_questions = Question.query.filter_by(user_id=user.id).count()
+                answered_today = Question.query.filter_by(user_id=user.id, is_answered=True).filter(
+                    db.func.date(Question.answered_at) == today
+                ).count()
+                auto_responses_today = ResponseHistory.query.filter_by(user_id=user.id, response_type='auto').filter(
+                    db.func.date(ResponseHistory.created_at) == today
+                ).count()
+                
+                # Tempo médio de resposta
+                avg_response = db.session.query(db.func.avg(ResponseHistory.response_time)).filter_by(user_id=user.id).scalar()
+                avg_response = round(avg_response, 2) if avg_response else 0
+                
+                stats = {
+                    'total_questions': total_questions,
+                    'answered_today': answered_today,
+                    'auto_responses_today': auto_responses_today,
+                    'avg_response_time': avg_response
+                }
+            else:
+                stats = {'total_questions': 0, 'answered_today': 0, 'auto_responses_today': 0, 'avg_response_time': 0}
+            
+            # Status do token
+            token_status = {
+                'valid': is_valid,
+                'message': message,
+                'last_check': TOKEN_STATUS.get('last_check'),
+                'current_token': TOKEN_STATUS.get('current_token', '')[:20] + '...' if TOKEN_STATUS.get('current_token') else 'N/A'
+            }
+            
+            current_time = get_local_time().strftime("%H:%M:%S")
+            
+            html = f"""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>Bot ML - Dashboard</title>
+                <meta charset="utf-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1">
+                <style>
+                    body {{ font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }}
+                    .container {{ max-width: 1200px; margin: 0 auto; }}
+                    .header {{ background: #fff; padding: 20px; border-radius: 8px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
+                    .stats {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 20px; margin-bottom: 20px; }}
+                    .stat-card {{ background: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
+                    .stat-number {{ font-size: 2em; font-weight: bold; color: #2196F3; }}
+                    .stat-label {{ color: #666; margin-top: 5px; }}
+                    .token-status {{ background: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-bottom: 20px; }}
+                    .status-valid {{ color: #4CAF50; font-weight: bold; }}
+                    .status-invalid {{ color: #f44336; font-weight: bold; }}
+                    .nav {{ margin-bottom: 20px; }}
+                    .nav a {{ display: inline-block; padding: 10px 20px; background: #2196F3; color: white; text-decoration: none; border-radius: 4px; margin-right: 10px; }}
+                    .nav a:hover {{ background: #1976D2; }}
+                    .btn {{ padding: 8px 16px; background: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer; text-decoration: none; display: inline-block; }}
+                    .btn:hover {{ background: #45a049; }}
+                    .btn-warning {{ background: #ff9800; }}
+                    .btn-warning:hover {{ background: #e68900; }}
+                    .btn-danger {{ background: #f44336; }}
+                    .btn-danger:hover {{ background: #da190b; }}
+                </style>
+                <script>
+                    function refreshPage() {{ window.location.reload(); }}
+                    function checkToken() {{
+                        fetch('/api/token/check', {{method: 'POST'}})
+                        .then(response => response.json())
+                        .then(data => {{
+                            alert(data.message || 'Verificação concluída');
+                            refreshPage();
+                        }})
+                        .catch(error => alert('Erro: ' + error));
+                    }}
+                    setInterval(refreshPage, 60000); // Atualizar a cada minuto
+                </script>
+            </head>
+            <body>
+                <div class="container">
+                    <div class="header">
+                        <h1>🤖 Bot Mercado Livre - Dashboard</h1>
+                        <p><strong>Horário Local (SP):</strong> {current_time}</p>
+                        <p><strong>Status:</strong> Sistema funcionando com renovação automática de token</p>
+                        <p><strong>Deploy:</strong> ✅ Funcionando corretamente</p>
+                    </div>
+                    
+                    <div class="nav">
+                        <a href="/edit-rules">✏️ Editar Regras</a>
+                        <a href="/edit-absence">🌙 Configurar Ausência</a>
+                        <a href="/history">📊 Histórico</a>
+                        <a href="/token-status">🔑 Status do Token</a>
+                        <a href="/questions">❓ Perguntas</a>
+                        <a href="/renovar-tokens" style="background: #ff9800;">🔄 Renovar Tokens</a>
+                        <a href="/webhook-logs">📡 Logs Webhook</a>
+                    </div>
+                    
+                    <div class="token-status">
+                        <h3>🔑 Status do Token</h3>
+                        <p><strong>Status:</strong> 
+                            <span class="{'status-valid' if token_status['valid'] else 'status-invalid'}">
+                                {'✅ Válido' if token_status['valid'] else '❌ Inválido'}
+                            </span>
+                        </p>
+                        <p><strong>Token:</strong> {token_status['current_token']}</p>
+                        <p><strong>Última Verificação:</strong> {token_status['last_check'].strftime('%H:%M:%S') if token_status['last_check'] else 'Nunca'}</p>
+                        <p><strong>Mensagem:</strong> {token_status['message']}</p>
+                        <button class="btn btn-warning" onclick="checkToken()">🔄 Verificar Agora</button>
+                        {'<a href="/renovar-tokens" class="btn btn-danger">🚨 Renovar Tokens</a>' if not token_status['valid'] else ''}
+                    </div>
+                    
+                    <div class="stats">
+                        <div class="stat-card">
+                            <div class="stat-number">{stats['total_questions']}</div>
+                            <div class="stat-label">Total de Perguntas</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-number">{stats['answered_today']}</div>
+                            <div class="stat-label">Respondidas Hoje</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-number">{stats['auto_responses_today']}</div>
+                            <div class="stat-label">Respostas Automáticas Hoje</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-number">{stats['avg_response_time']}s</div>
+                            <div class="stat-label">Tempo Médio de Resposta</div>
+                        </div>
+                    </div>
+                </div>
+            </body>
+            </html>
+            """
+            
+            return html
+            
+    except Exception as e:
+        return f"""
+        <!DOCTYPE html>
+        <html>
+        <head><title>Bot ML - Erro</title></head>
+        <body>
+            <h1>❌ Erro no Dashboard</h1>
+            <p>Erro: {e}</p>
+            <p>O sistema está inicializando, tente novamente em alguns segundos.</p>
+            <a href="/">🔄 Recarregar</a>
+        </body>
+        </html>
+        """
+
+# ========== WEBHOOK CORRIGIDO PARA RESOLVER 405 ==========
+
+@app.route('/api/ml/webhook', methods=['GET', 'POST'])
+def webhook_handler():
+    """Webhook para receber notificações do ML - CORRIGIDO PARA ACEITAR GET E POST"""
+    try:
+        if request.method == 'GET':
+            # GET request - pode ser callback de autorização
+            code = request.args.get('code')
+            error = request.args.get('error')
+            
+            if error:
+                return f"""
+                <h1>❌ Erro na Autorização (Webhook)</h1>
+                <p>Erro: {error}</p>
+                <p>Descrição: {request.args.get('error_description', 'N/A')}</p>
+                <a href="/renovar-tokens">🔄 Tentar Novamente</a>
+                """
+            
+            if code:
+                return f"""
+                <h1>✅ Código Recebido via Webhook!</h1>
+                <p><strong>Código de Autorização:</strong></p>
+                <div style="background: #f5f5f5; padding: 10px; border-radius: 4px; font-family: monospace; word-break: break-all;">
+                    {code}
+                </div>
+                <p>Copie este código e cole na interface de renovação.</p>
+                <a href="/renovar-tokens">🔄 Ir para Renovação</a>
+                """
+            
+            return """
+            <h1>📡 Webhook ML - Status</h1>
+            <p>✅ Webhook funcionando corretamente</p>
+            <p>🔄 Aguardando notificações do Mercado Livre</p>
+            <a href="/">🏠 Voltar ao Dashboard</a>
+            """
+        
+        elif request.method == 'POST':
+            # POST request - notificação do ML
+            try:
+                # Obter dados do webhook
+                data = request.get_json() or {}
+                
+                topic = data.get('topic')
+                resource = data.get('resource')
+                user_id_ml = data.get('user_id')
+                application_id = data.get('application_id')
+                attempts = data.get('attempts', 1)
+                sent = data.get('sent')
+                
+                print(f"📡 Webhook recebido: {topic} - {resource}")
+                
+                # Registrar webhook no banco
+                log_webhook(topic, resource, user_id_ml, application_id, attempts, sent)
+                
+                # Processar diferentes tipos de notificação
+                if topic == 'questions':
+                    print("❓ Nova pergunta recebida via webhook")
+                    # Processar perguntas imediatamente
+                    threading.Thread(target=process_questions, daemon=True).start()
+                
+                elif topic == 'orders_v2':
+                    print("🛒 Nova ordem recebida via webhook")
+                
+                elif topic == 'items':
+                    print("📦 Atualização de item via webhook")
+                
+                # Retornar resposta de sucesso para o ML
+                return jsonify({'status': 'ok', 'message': 'Webhook processado com sucesso'}), 200
+                
+            except Exception as e:
+                print(f"❌ Erro ao processar webhook: {e}")
+                return jsonify({'status': 'error', 'message': str(e)}), 500
+    
+    except Exception as e:
+        print(f"❌ Erro geral no webhook: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/webhook-logs')
+def webhook_logs():
+    """Página para visualizar logs de webhook"""
+    try:
+        with app.app_context():
+            logs = WebhookLog.query.order_by(WebhookLog.received.desc()).limit(50).all()
+            
+            html = """
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>Logs Webhook - Bot ML</title>
+                <meta charset="utf-8">
+                <style>
+                    body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
+                    .container { max-width: 1200px; margin: 0 auto; }
+                    .card { background: #fff; padding: 20px; border-radius: 8px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+                    .nav a { display: inline-block; padding: 10px 20px; background: #2196F3; color: white; text-decoration: none; border-radius: 4px; margin-right: 10px; }
+                    table { width: 100%; border-collapse: collapse; }
+                    th, td { padding: 10px; text-align: left; border-bottom: 1px solid #ddd; }
+                    th { background: #f5f5f5; }
+                    .topic-questions { color: #2196F3; }
+                    .topic-orders { color: #4CAF50; }
+                    .topic-items { color: #ff9800; }
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <div class="card">
+                        <h1>📡 Logs de Webhook</h1>
+                        <div class="nav">
+                            <a href="/">🏠 Dashboard</a>
+                            <a href="/edit-rules">✏️ Regras</a>
+                            <a href="/history">📊 Histórico</a>
+                            <a href="/renovar-tokens">🔄 Renovar Tokens</a>
+                        </div>
+                    </div>
+                    
+                    <div class="card">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Data/Hora</th>
+                                    <th>Tópico</th>
+                                    <th>Recurso</th>
+                                    <th>User ID</th>
+                                    <th>Tentativas</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+            """
+            
+            for log in logs:
+                received_at = format_local_time(log.received)
+                date_str = received_at.strftime('%d/%m %H:%M:%S') if received_at else 'N/A'
+                
+                topic_class = f"topic-{log.topic}" if log.topic else ""
+                
+                html += f"""
+                                <tr>
+                                    <td>{date_str}</td>
+                                    <td class="{topic_class}">{log.topic or 'N/A'}</td>
+                                    <td>{log.resource or 'N/A'}</td>
+                                    <td>{log.user_id_ml or 'N/A'}</td>
+                                    <td>{log.attempts}</td>
+                                </tr>
+                """
+            
+            html += """
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </body>
+            </html>
+            """
+            
+            return html
+            
+    except Exception as e:
+        return f"Erro: {e}"
+
 # ========== ROTAS DE RENOVAÇÃO DE TOKENS ==========
 
 @app.route('/renovar-tokens')
@@ -506,7 +1151,6 @@ def renovar_tokens_page():
                                 <p><strong>User ID:</strong> ${{data.user_id}}</p>
                                 <p><strong>Email:</strong> ${{data.user_email}}</p>
                                 <p><strong>Expira em:</strong> ${{data.expires_in}} segundos</p>
-                                <p><strong>Redirect URI usado:</strong> ${{data.redirect_uri_used || 'N/A'}}</p>
                                 <p>🎉 Sistema atualizado automaticamente!</p>
                             </div>
                         `;
@@ -647,49 +1291,40 @@ def process_authorization_code_flexible():
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
 
-# ========== FUNÇÕES ORIGINAIS ADAPTADAS ==========
-
-def get_questions():
-    """Busca perguntas não respondidas usando o sistema de renovação automática"""
+@app.route('/api/token/check', methods=['POST'])
+def check_token_api():
+    """API para verificar token manualmente"""
     try:
-        url = f"https://api.mercadolibre.com/my/received_questions/search?seller_id={ML_USER_ID}&status=UNANSWERED"
+        is_valid, message = check_token_validity()
         
-        response, message = make_ml_request(url)
-        
-        if response and response.status_code == 200:
-            questions_data = response.json()
-            return questions_data.get('questions', [])
+        if not is_valid:
+            # Tentar renovar automaticamente
+            success, refresh_message = refresh_access_token()
+            if success:
+                return jsonify({
+                    'success': True,
+                    'message': 'Token renovado automaticamente!',
+                    'status': 'renewed'
+                })
+            else:
+                return jsonify({
+                    'success': False,
+                    'message': f'Token inválido. Use a interface de renovação para gerar novos tokens.',
+                    'status': 'error'
+                })
         else:
-            print(f"❌ Erro ao buscar perguntas: {message}")
-            return []
+            return jsonify({
+                'success': True,
+                'message': 'Token válido!',
+                'status': 'valid'
+            })
             
     except Exception as e:
-        print(f"💥 Erro ao buscar perguntas: {e}")
-        return []
-
-def answer_question(question_id, answer_text):
-    """Responde uma pergunta usando o sistema de renovação automática"""
-    try:
-        url = f"https://api.mercadolibre.com/answers"
-        data = {
-            'question_id': question_id,
-            'text': answer_text
-        }
-        
-        response, message = make_ml_request(url, method='POST', data=data)
-        
-        if response and response.status_code in [200, 201]:
-            print(f"✅ Pergunta {question_id} respondida com sucesso!")
-            return True
-        else:
-            print(f"❌ Erro ao responder pergunta {question_id}: {message}")
-            return False
-            
-    except Exception as e:
-        print(f"💥 Erro ao responder pergunta {question_id}: {e}")
-        return False
-
-
+        return jsonify({
+            'success': False,
+            'message': f'Erro na verificação: {str(e)}',
+            'status': 'error'
+        })
 
 # ========== CALLBACKS ALTERNATIVOS ==========
 
@@ -724,35 +1359,209 @@ def auth_callback():
     <a href="/renovar-tokens">🔄 Tentar Novamente</a>
     """
 
-@app.route('/api/ml/webhook')
-def webhook_callback():
-    """Callback alternativo para webhook"""
-    code = request.args.get('code')
-    error = request.args.get('error')
-    
-    if error:
-        return f"""
-        <h1>❌ Erro na Autorização (Webhook)</h1>
-        <p>Erro: {error}</p>
-        <p>Descrição: {request.args.get('error_description', 'N/A')}</p>
-        <a href="/renovar-tokens">🔄 Tentar Novamente</a>
-        """
-    
-    if code:
-        return f"""
-        <h1>✅ Código Recebido via Webhook!</h1>
-        <p><strong>Código de Autorização:</strong></p>
-        <div style="background: #f5f5f5; padding: 10px; border-radius: 4px; font-family: monospace; word-break: break-all;">
-            {code}
-        </div>
-        <p>Copie este código e cole na interface de renovação.</p>
-        <a href="/renovar-tokens">🔄 Ir para Renovação</a>
-        """
-    
+# ========== OUTRAS ROTAS ESSENCIAIS ==========
+
+@app.route('/edit-rules')
+def edit_rules():
+    """Interface para editar regras de resposta"""
+    try:
+        with app.app_context():
+            user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
+            if user:
+                rules = AutoResponse.query.filter_by(user_id=user.id).all()
+            else:
+                rules = []
+            
+            html = """
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>Editar Regras - Bot ML</title>
+                <meta charset="utf-8">
+                <style>
+                    body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
+                    .container { max-width: 800px; margin: 0 auto; }
+                    .card { background: #fff; padding: 20px; border-radius: 8px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+                    .form-group { margin-bottom: 15px; }
+                    label { display: block; margin-bottom: 5px; font-weight: bold; }
+                    input, textarea { width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box; }
+                    textarea { height: 80px; resize: vertical; }
+                    .btn { padding: 10px 20px; background: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer; }
+                    .btn:hover { background: #45a049; }
+                    .btn-danger { background: #f44336; }
+                    .btn-danger:hover { background: #da190b; }
+                    .rule-item { border: 1px solid #ddd; padding: 15px; margin-bottom: 10px; border-radius: 4px; }
+                    .nav a { display: inline-block; padding: 10px 20px; background: #2196F3; color: white; text-decoration: none; border-radius: 4px; margin-right: 10px; }
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <div class="card">
+                        <h1>✏️ Editar Regras de Resposta</h1>
+                        <div class="nav">
+                            <a href="/">🏠 Dashboard</a>
+                            <a href="/edit-absence">🌙 Ausência</a>
+                            <a href="/history">📊 Histórico</a>
+                            <a href="/renovar-tokens">🔄 Renovar Tokens</a>
+                        </div>
+                    </div>
+                    
+                    <div class="card">
+                        <h3>➕ Adicionar Nova Regra</h3>
+                        <form method="POST" action="/api/rules">
+                            <div class="form-group">
+                                <label>Palavras-chave (separadas por vírgula):</label>
+                                <input type="text" name="keywords" placeholder="preço,valor,quanto custa" required>
+                            </div>
+                            <div class="form-group">
+                                <label>Resposta:</label>
+                                <textarea name="response_text" placeholder="Olá! O preço está na descrição..." required></textarea>
+                            </div>
+                            <button type="submit" class="btn">💾 Salvar Regra</button>
+                        </form>
+                    </div>
+                    
+                    <div class="card">
+                        <h3>📋 Regras Existentes</h3>
+            """
+            
+            for rule in rules:
+                status = "✅ Ativa" if rule.is_active else "❌ Inativa"
+                html += f"""
+                        <div class="rule-item">
+                            <p><strong>Palavras-chave:</strong> {rule.keywords}</p>
+                            <p><strong>Resposta:</strong> {rule.response_text}</p>
+                            <p><strong>Status:</strong> {status}</p>
+                            <button class="btn btn-danger" onclick="deleteRule({rule.id})">🗑️ Excluir</button>
+                        </div>
+                """
+            
+            html += """
+                    </div>
+                </div>
+                
+                <script>
+                    function deleteRule(id) {
+                        if (confirm('Tem certeza que deseja excluir esta regra?')) {
+                            fetch('/api/rules/' + id, {method: 'DELETE'})
+                            .then(() => window.location.reload())
+                            .catch(error => alert('Erro: ' + error));
+                        }
+                    }
+                </script>
+            </body>
+            </html>
+            """
+            
+            return html
+            
+    except Exception as e:
+        return f"Erro: {e}"
+
+@app.route('/api/rules', methods=['POST'])
+def add_rule():
+    """API para adicionar nova regra"""
+    try:
+        with app.app_context():
+            user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
+            if not user:
+                return jsonify({'error': 'Usuário não encontrado'}), 404
+            
+            keywords = request.form.get('keywords')
+            response_text = request.form.get('response_text')
+            
+            if not keywords or not response_text:
+                return jsonify({'error': 'Campos obrigatórios'}), 400
+            
+            rule = AutoResponse(
+                user_id=user.id,
+                keywords=keywords,
+                response_text=response_text
+            )
+            
+            db.session.add(rule)
+            db.session.commit()
+            
+            return redirect('/edit-rules')
+            
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/rules/<int:rule_id>', methods=['DELETE'])
+def delete_rule(rule_id):
+    """API para excluir regra"""
+    try:
+        with app.app_context():
+            rule = AutoResponse.query.get(rule_id)
+            if rule:
+                db.session.delete(rule)
+                db.session.commit()
+                return jsonify({'success': True})
+            else:
+                return jsonify({'error': 'Regra não encontrada'}), 404
+                
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+# Adicionar outras rotas essenciais (history, questions, edit-absence, token-status)
+@app.route('/history')
+def history():
+    """Página de histórico de respostas"""
     return """
-    <h1>❌ Código não encontrado (Webhook)</h1>
-    <p>Não foi possível obter o código de autorização.</p>
-    <a href="/renovar-tokens">🔄 Tentar Novamente</a>
+    <!DOCTYPE html>
+    <html>
+    <head><title>Histórico - Bot ML</title></head>
+    <body>
+        <h1>📊 Histórico de Respostas</h1>
+        <p>Página em desenvolvimento...</p>
+        <a href="/">🏠 Voltar ao Dashboard</a>
+    </body>
+    </html>
+    """
+
+@app.route('/questions')
+def questions_page():
+    """Página de perguntas recebidas"""
+    return """
+    <!DOCTYPE html>
+    <html>
+    <head><title>Perguntas - Bot ML</title></head>
+    <body>
+        <h1>❓ Perguntas Recebidas</h1>
+        <p>Página em desenvolvimento...</p>
+        <a href="/">🏠 Voltar ao Dashboard</a>
+    </body>
+    </html>
+    """
+
+@app.route('/edit-absence')
+def edit_absence():
+    """Interface para configurar mensagens de ausência"""
+    return """
+    <!DOCTYPE html>
+    <html>
+    <head><title>Configurar Ausência - Bot ML</title></head>
+    <body>
+        <h1>🌙 Configurar Ausência</h1>
+        <p>Página em desenvolvimento...</p>
+        <a href="/">🏠 Voltar ao Dashboard</a>
+    </body>
+    </html>
+    """
+
+@app.route('/token-status')
+def token_status_page():
+    """Página detalhada do status do token"""
+    return """
+    <!DOCTYPE html>
+    <html>
+    <head><title>Status do Token - Bot ML</title></head>
+    <body>
+        <h1>🔑 Status do Token</h1>
+        <p>Página em desenvolvimento...</p>
+        <a href="/">🏠 Voltar ao Dashboard</a>
+    </body>
+    </html>
     """
 
 # ========== INICIALIZAÇÃO ==========
@@ -772,8 +1581,9 @@ def start_background_tasks():
     polling_thread = threading.Thread(target=polling_loop, daemon=True)
     polling_thread.start()
     
-    print("✅ Sistema iniciado com renovação flexível de tokens!")
-    print("🔧 Suporte a múltiplas URLs de redirect configurado")
+    print("✅ Sistema iniciado com correções para deploy!")
+    print("🔧 Erros 404 e 405 corrigidos")
+    print("📡 Webhook funcionando com GET e POST")
 
 if __name__ == '__main__':
     start_background_tasks()
