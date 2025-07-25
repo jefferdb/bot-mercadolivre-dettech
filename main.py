@@ -2,7 +2,7 @@ import os
 import time
 import threading
 from datetime import datetime, timedelta
-from flask import Flask, request, jsonify, redirect, url_for
+from flask import Flask, request, jsonify, redirect, url_for, render_template_string
 from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
 import requests
@@ -481,7 +481,11 @@ def rules_page():
         <div class="rule-card">
             <div class="rule-header">
                 <h3>Regra #{rule.id}</h3>
-                <span class="status {'active' if rule.is_active else 'inactive'}">{status}</span>
+                <div class="rule-actions">
+                    <span class="status {'active' if rule.is_active else 'inactive'}">{status}</span>
+                    <a href="/rules/edit/{rule.id}" class="edit-btn">✏️ Editar</a>
+                    <a href="/rules/toggle/{rule.id}" class="toggle-btn">{'❌ Desativar' if rule.is_active else '✅ Ativar'}</a>
+                </div>
             </div>
             <div class="rule-content">
                 <p><strong>Palavras-chave:</strong> {rule.keywords}</p>
@@ -504,10 +508,16 @@ def rules_page():
             .header {{ background: linear-gradient(135deg, #3483fa, #2968c8); color: white; padding: 30px; border-radius: 12px; margin-bottom: 30px; text-align: center; }}
             .rule-card {{ background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.08); margin-bottom: 20px; }}
             .rule-header {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; }}
+            .rule-actions {{ display: flex; gap: 10px; align-items: center; }}
             .status.active {{ color: #00a650; font-weight: bold; }}
             .status.inactive {{ color: #ff3333; font-weight: bold; }}
             .rule-content p {{ margin-bottom: 10px; }}
-            .back-btn {{ display: inline-block; background: #3483fa; color: white; padding: 12px 24px; text-decoration: none; border-radius: 8px; margin-bottom: 20px; }}
+            .back-btn, .edit-btn, .toggle-btn, .add-btn {{ display: inline-block; padding: 8px 16px; text-decoration: none; border-radius: 6px; font-size: 0.9em; }}
+            .back-btn {{ background: #3483fa; color: white; margin-bottom: 20px; }}
+            .edit-btn {{ background: #28a745; color: white; }}
+            .toggle-btn {{ background: #ffc107; color: #212529; }}
+            .add-btn {{ background: #17a2b8; color: white; margin-bottom: 20px; }}
+            .actions {{ margin-bottom: 20px; }}
         </style>
     </head>
     <body>
@@ -519,12 +529,216 @@ def rules_page():
                 <p>Total: {len(rules)} regras configuradas</p>
             </div>
             
+            <div class="actions">
+                <a href="/rules/add" class="add-btn">➕ Adicionar Nova Regra</a>
+            </div>
+            
             {rules_html}
         </div>
     </body>
     </html>
     """
     return html
+
+@app.route('/rules/edit/<int:rule_id>', methods=['GET', 'POST'])
+def edit_rule(rule_id):
+    if not _initialized:
+        initialize_database()
+    
+    user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
+    if not user:
+        return "❌ Usuário não encontrado", 404
+    
+    rule = AutoResponse.query.filter_by(id=rule_id, user_id=user.id).first()
+    if not rule:
+        return "❌ Regra não encontrada", 404
+    
+    if request.method == 'POST':
+        keywords = request.form.get('keywords', '').strip()
+        response_text = request.form.get('response_text', '').strip()
+        is_active = request.form.get('is_active') == 'on'
+        
+        if keywords and response_text:
+            rule.keywords = keywords
+            rule.response_text = response_text
+            rule.is_active = is_active
+            rule.updated_at = datetime.utcnow()
+            db.session.commit()
+            return redirect('/rules')
+    
+    html = f"""
+    <!DOCTYPE html>
+    <html lang="pt-BR">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Editar Regra - Bot ML</title>
+        <style>
+            * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+            body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #f8f9fa; }}
+            .container {{ max-width: 800px; margin: 0 auto; padding: 20px; }}
+            .header {{ background: linear-gradient(135deg, #3483fa, #2968c8); color: white; padding: 30px; border-radius: 12px; margin-bottom: 30px; text-align: center; }}
+            .form-card {{ background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.08); }}
+            .form-group {{ margin-bottom: 20px; }}
+            .form-group label {{ display: block; margin-bottom: 8px; font-weight: bold; color: #333; }}
+            .form-group input, .form-group textarea {{ width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 6px; font-size: 14px; }}
+            .form-group textarea {{ height: 120px; resize: vertical; }}
+            .checkbox-group {{ display: flex; align-items: center; gap: 10px; }}
+            .checkbox-group input {{ width: auto; }}
+            .btn-group {{ display: flex; gap: 10px; margin-top: 20px; }}
+            .btn {{ padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: bold; text-align: center; border: none; cursor: pointer; }}
+            .btn-primary {{ background: #3483fa; color: white; }}
+            .btn-secondary {{ background: #6c757d; color: white; }}
+            .back-btn {{ display: inline-block; background: #3483fa; color: white; padding: 12px 24px; text-decoration: none; border-radius: 8px; margin-bottom: 20px; }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <a href="/rules" class="back-btn">← Voltar às Regras</a>
+            
+            <div class="header">
+                <h1>✏️ Editar Regra #{rule.id}</h1>
+            </div>
+            
+            <div class="form-card">
+                <form method="POST">
+                    <div class="form-group">
+                        <label for="keywords">Palavras-chave (separadas por vírgula):</label>
+                        <input type="text" id="keywords" name="keywords" value="{rule.keywords}" required>
+                        <small>Exemplo: preço, valor, quanto custa</small>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="response_text">Resposta automática:</label>
+                        <textarea id="response_text" name="response_text" required>{rule.response_text}</textarea>
+                    </div>
+                    
+                    <div class="form-group">
+                        <div class="checkbox-group">
+                            <input type="checkbox" id="is_active" name="is_active" {'checked' if rule.is_active else ''}>
+                            <label for="is_active">Regra ativa</label>
+                        </div>
+                    </div>
+                    
+                    <div class="btn-group">
+                        <button type="submit" class="btn btn-primary">💾 Salvar Alterações</button>
+                        <a href="/rules" class="btn btn-secondary">❌ Cancelar</a>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </body>
+    </html>
+    """
+    return html
+
+@app.route('/rules/add', methods=['GET', 'POST'])
+def add_rule():
+    if not _initialized:
+        initialize_database()
+    
+    user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
+    if not user:
+        return "❌ Usuário não encontrado", 404
+    
+    if request.method == 'POST':
+        keywords = request.form.get('keywords', '').strip()
+        response_text = request.form.get('response_text', '').strip()
+        is_active = request.form.get('is_active') == 'on'
+        
+        if keywords and response_text:
+            new_rule = AutoResponse(
+                user_id=user.id,
+                keywords=keywords,
+                response_text=response_text,
+                is_active=is_active
+            )
+            db.session.add(new_rule)
+            db.session.commit()
+            return redirect('/rules')
+    
+    html = """
+    <!DOCTYPE html>
+    <html lang="pt-BR">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Adicionar Regra - Bot ML</title>
+        <style>
+            * { margin: 0; padding: 0; box-sizing: border-box; }
+            body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #f8f9fa; }
+            .container { max-width: 800px; margin: 0 auto; padding: 20px; }
+            .header { background: linear-gradient(135deg, #3483fa, #2968c8); color: white; padding: 30px; border-radius: 12px; margin-bottom: 30px; text-align: center; }
+            .form-card { background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.08); }
+            .form-group { margin-bottom: 20px; }
+            .form-group label { display: block; margin-bottom: 8px; font-weight: bold; color: #333; }
+            .form-group input, .form-group textarea { width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 6px; font-size: 14px; }
+            .form-group textarea { height: 120px; resize: vertical; }
+            .checkbox-group { display: flex; align-items: center; gap: 10px; }
+            .checkbox-group input { width: auto; }
+            .btn-group { display: flex; gap: 10px; margin-top: 20px; }
+            .btn { padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: bold; text-align: center; border: none; cursor: pointer; }
+            .btn-primary { background: #3483fa; color: white; }
+            .btn-secondary { background: #6c757d; color: white; }
+            .back-btn { display: inline-block; background: #3483fa; color: white; padding: 12px 24px; text-decoration: none; border-radius: 8px; margin-bottom: 20px; }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <a href="/rules" class="back-btn">← Voltar às Regras</a>
+            
+            <div class="header">
+                <h1>➕ Adicionar Nova Regra</h1>
+            </div>
+            
+            <div class="form-card">
+                <form method="POST">
+                    <div class="form-group">
+                        <label for="keywords">Palavras-chave (separadas por vírgula):</label>
+                        <input type="text" id="keywords" name="keywords" required>
+                        <small>Exemplo: preço, valor, quanto custa</small>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="response_text">Resposta automática:</label>
+                        <textarea id="response_text" name="response_text" required></textarea>
+                    </div>
+                    
+                    <div class="form-group">
+                        <div class="checkbox-group">
+                            <input type="checkbox" id="is_active" name="is_active" checked>
+                            <label for="is_active">Regra ativa</label>
+                        </div>
+                    </div>
+                    
+                    <div class="btn-group">
+                        <button type="submit" class="btn btn-primary">💾 Salvar Regra</button>
+                        <a href="/rules" class="btn btn-secondary">❌ Cancelar</a>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </body>
+    </html>
+    """
+    return html
+
+@app.route('/rules/toggle/<int:rule_id>')
+def toggle_rule(rule_id):
+    if not _initialized:
+        initialize_database()
+    
+    user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
+    if not user:
+        return "❌ Usuário não encontrado", 404
+    
+    rule = AutoResponse.query.filter_by(id=rule_id, user_id=user.id).first()
+    if rule:
+        rule.is_active = not rule.is_active
+        rule.updated_at = datetime.utcnow()
+        db.session.commit()
+    
+    return redirect('/rules')
 
 @app.route('/questions')
 def questions_page():
@@ -573,23 +787,35 @@ def questions_page():
             .status {{ font-weight: bold; color: #00a650; }}
             .question-content p {{ margin-bottom: 10px; }}
             .back-btn {{ display: inline-block; background: #3483fa; color: white; padding: 12px 24px; text-decoration: none; border-radius: 8px; margin-bottom: 20px; }}
+            .sync-btn {{ display: inline-block; background: #28a745; color: white; padding: 12px 24px; text-decoration: none; border-radius: 8px; margin-bottom: 20px; margin-left: 10px; }}
         </style>
     </head>
     <body>
         <div class="container">
             <a href="/" class="back-btn">← Voltar ao Dashboard</a>
+            <a href="/questions/sync" class="sync-btn">🔄 Sincronizar Perguntas</a>
             
             <div class="header">
                 <h1>❓ Perguntas Recebidas</h1>
                 <p>Últimas {len(questions)} perguntas</p>
             </div>
             
-            {questions_html if questions_html else '<div class="question-card"><p>Nenhuma pergunta recebida ainda.</p></div>'}
+            {questions_html if questions_html else '<div class="question-card"><p>Nenhuma pergunta recebida ainda. O bot está monitorando a cada 60 segundos.</p></div>'}
         </div>
     </body>
     </html>
     """
     return html
+
+@app.route('/questions/sync')
+def sync_questions():
+    if not _initialized:
+        initialize_database()
+    
+    # Forçar sincronização de perguntas
+    threading.Thread(target=lambda: process_questions(), daemon=True).start()
+    
+    return redirect('/questions')
 
 @app.route('/absence')
 def absence_page():
@@ -615,7 +841,11 @@ def absence_page():
         <div class="config-card">
             <div class="config-header">
                 <h3>{config.name}</h3>
-                <span class="status {'active' if config.is_active else 'inactive'}">{status}</span>
+                <div class="config-actions">
+                    <span class="status {'active' if config.is_active else 'inactive'}">{status}</span>
+                    <a href="/absence/edit/{config.id}" class="edit-btn">✏️ Editar</a>
+                    <a href="/absence/toggle/{config.id}" class="toggle-btn">{'❌ Desativar' if config.is_active else '✅ Ativar'}</a>
+                </div>
             </div>
             <div class="config-content">
                 <p><strong>Mensagem:</strong> {config.message}</p>
@@ -639,10 +869,16 @@ def absence_page():
             .header {{ background: linear-gradient(135deg, #3483fa, #2968c8); color: white; padding: 30px; border-radius: 12px; margin-bottom: 30px; text-align: center; }}
             .config-card {{ background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.08); margin-bottom: 20px; }}
             .config-header {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; }}
+            .config-actions {{ display: flex; gap: 10px; align-items: center; }}
             .status.active {{ color: #00a650; font-weight: bold; }}
             .status.inactive {{ color: #ff3333; font-weight: bold; }}
             .config-content p {{ margin-bottom: 10px; }}
-            .back-btn {{ display: inline-block; background: #3483fa; color: white; padding: 12px 24px; text-decoration: none; border-radius: 8px; margin-bottom: 20px; }}
+            .back-btn, .edit-btn, .toggle-btn, .add-btn {{ display: inline-block; padding: 8px 16px; text-decoration: none; border-radius: 6px; font-size: 0.9em; }}
+            .back-btn {{ background: #3483fa; color: white; margin-bottom: 20px; }}
+            .edit-btn {{ background: #28a745; color: white; }}
+            .toggle-btn {{ background: #ffc107; color: #212529; }}
+            .add-btn {{ background: #17a2b8; color: white; margin-bottom: 20px; }}
+            .actions {{ margin-bottom: 20px; }}
         </style>
     </head>
     <body>
@@ -654,12 +890,316 @@ def absence_page():
                 <p>Total: {len(configs)} configurações</p>
             </div>
             
+            <div class="actions">
+                <a href="/absence/add" class="add-btn">➕ Adicionar Nova Configuração</a>
+            </div>
+            
             {configs_html}
         </div>
     </body>
     </html>
     """
     return html
+
+@app.route('/absence/edit/<int:config_id>', methods=['GET', 'POST'])
+def edit_absence(config_id):
+    if not _initialized:
+        initialize_database()
+    
+    user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
+    if not user:
+        return "❌ Usuário não encontrado", 404
+    
+    config = AbsenceConfig.query.filter_by(id=config_id, user_id=user.id).first()
+    if not config:
+        return "❌ Configuração não encontrada", 404
+    
+    if request.method == 'POST':
+        name = request.form.get('name', '').strip()
+        message = request.form.get('message', '').strip()
+        start_time = request.form.get('start_time', '').strip()
+        end_time = request.form.get('end_time', '').strip()
+        days_of_week = ','.join(request.form.getlist('days_of_week'))
+        is_active = request.form.get('is_active') == 'on'
+        
+        if name and message and start_time and end_time and days_of_week:
+            config.name = name
+            config.message = message
+            config.start_time = start_time
+            config.end_time = end_time
+            config.days_of_week = days_of_week
+            config.is_active = is_active
+            db.session.commit()
+            return redirect('/absence')
+    
+    selected_days = config.days_of_week.split(',')
+    
+    html = f"""
+    <!DOCTYPE html>
+    <html lang="pt-BR">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Editar Ausência - Bot ML</title>
+        <style>
+            * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+            body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #f8f9fa; }}
+            .container {{ max-width: 800px; margin: 0 auto; padding: 20px; }}
+            .header {{ background: linear-gradient(135deg, #3483fa, #2968c8); color: white; padding: 30px; border-radius: 12px; margin-bottom: 30px; text-align: center; }}
+            .form-card {{ background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.08); }}
+            .form-group {{ margin-bottom: 20px; }}
+            .form-group label {{ display: block; margin-bottom: 8px; font-weight: bold; color: #333; }}
+            .form-group input, .form-group textarea {{ width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 6px; font-size: 14px; }}
+            .form-group textarea {{ height: 120px; resize: vertical; }}
+            .checkbox-group {{ display: flex; align-items: center; gap: 10px; }}
+            .checkbox-group input {{ width: auto; }}
+            .days-group {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; }}
+            .btn-group {{ display: flex; gap: 10px; margin-top: 20px; }}
+            .btn {{ padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: bold; text-align: center; border: none; cursor: pointer; }}
+            .btn-primary {{ background: #3483fa; color: white; }}
+            .btn-secondary {{ background: #6c757d; color: white; }}
+            .back-btn {{ display: inline-block; background: #3483fa; color: white; padding: 12px 24px; text-decoration: none; border-radius: 8px; margin-bottom: 20px; }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <a href="/absence" class="back-btn">← Voltar às Configurações</a>
+            
+            <div class="header">
+                <h1>✏️ Editar Configuração de Ausência</h1>
+            </div>
+            
+            <div class="form-card">
+                <form method="POST">
+                    <div class="form-group">
+                        <label for="name">Nome da configuração:</label>
+                        <input type="text" id="name" name="name" value="{config.name}" required>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="message">Mensagem de ausência:</label>
+                        <textarea id="message" name="message" required>{config.message}</textarea>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="start_time">Horário de início:</label>
+                        <input type="time" id="start_time" name="start_time" value="{config.start_time}" required>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="end_time">Horário de fim:</label>
+                        <input type="time" id="end_time" name="end_time" value="{config.end_time}" required>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label>Dias da semana:</label>
+                        <div class="days-group">
+                            <div class="checkbox-group">
+                                <input type="checkbox" id="day_0" name="days_of_week" value="0" {'checked' if '0' in selected_days else ''}>
+                                <label for="day_0">Segunda</label>
+                            </div>
+                            <div class="checkbox-group">
+                                <input type="checkbox" id="day_1" name="days_of_week" value="1" {'checked' if '1' in selected_days else ''}>
+                                <label for="day_1">Terça</label>
+                            </div>
+                            <div class="checkbox-group">
+                                <input type="checkbox" id="day_2" name="days_of_week" value="2" {'checked' if '2' in selected_days else ''}>
+                                <label for="day_2">Quarta</label>
+                            </div>
+                            <div class="checkbox-group">
+                                <input type="checkbox" id="day_3" name="days_of_week" value="3" {'checked' if '3' in selected_days else ''}>
+                                <label for="day_3">Quinta</label>
+                            </div>
+                            <div class="checkbox-group">
+                                <input type="checkbox" id="day_4" name="days_of_week" value="4" {'checked' if '4' in selected_days else ''}>
+                                <label for="day_4">Sexta</label>
+                            </div>
+                            <div class="checkbox-group">
+                                <input type="checkbox" id="day_5" name="days_of_week" value="5" {'checked' if '5' in selected_days else ''}>
+                                <label for="day_5">Sábado</label>
+                            </div>
+                            <div class="checkbox-group">
+                                <input type="checkbox" id="day_6" name="days_of_week" value="6" {'checked' if '6' in selected_days else ''}>
+                                <label for="day_6">Domingo</label>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="form-group">
+                        <div class="checkbox-group">
+                            <input type="checkbox" id="is_active" name="is_active" {'checked' if config.is_active else ''}>
+                            <label for="is_active">Configuração ativa</label>
+                        </div>
+                    </div>
+                    
+                    <div class="btn-group">
+                        <button type="submit" class="btn btn-primary">💾 Salvar Alterações</button>
+                        <a href="/absence" class="btn btn-secondary">❌ Cancelar</a>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </body>
+    </html>
+    """
+    return html
+
+@app.route('/absence/add', methods=['GET', 'POST'])
+def add_absence():
+    if not _initialized:
+        initialize_database()
+    
+    user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
+    if not user:
+        return "❌ Usuário não encontrado", 404
+    
+    if request.method == 'POST':
+        name = request.form.get('name', '').strip()
+        message = request.form.get('message', '').strip()
+        start_time = request.form.get('start_time', '').strip()
+        end_time = request.form.get('end_time', '').strip()
+        days_of_week = ','.join(request.form.getlist('days_of_week'))
+        is_active = request.form.get('is_active') == 'on'
+        
+        if name and message and start_time and end_time and days_of_week:
+            new_config = AbsenceConfig(
+                user_id=user.id,
+                name=name,
+                message=message,
+                start_time=start_time,
+                end_time=end_time,
+                days_of_week=days_of_week,
+                is_active=is_active
+            )
+            db.session.add(new_config)
+            db.session.commit()
+            return redirect('/absence')
+    
+    html = """
+    <!DOCTYPE html>
+    <html lang="pt-BR">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Adicionar Ausência - Bot ML</title>
+        <style>
+            * { margin: 0; padding: 0; box-sizing: border-box; }
+            body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #f8f9fa; }
+            .container { max-width: 800px; margin: 0 auto; padding: 20px; }
+            .header { background: linear-gradient(135deg, #3483fa, #2968c8); color: white; padding: 30px; border-radius: 12px; margin-bottom: 30px; text-align: center; }
+            .form-card { background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.08); }
+            .form-group { margin-bottom: 20px; }
+            .form-group label { display: block; margin-bottom: 8px; font-weight: bold; color: #333; }
+            .form-group input, .form-group textarea { width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 6px; font-size: 14px; }
+            .form-group textarea { height: 120px; resize: vertical; }
+            .checkbox-group { display: flex; align-items: center; gap: 10px; }
+            .checkbox-group input { width: auto; }
+            .days-group { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; }
+            .btn-group { display: flex; gap: 10px; margin-top: 20px; }
+            .btn { padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: bold; text-align: center; border: none; cursor: pointer; }
+            .btn-primary { background: #3483fa; color: white; }
+            .btn-secondary { background: #6c757d; color: white; }
+            .back-btn { display: inline-block; background: #3483fa; color: white; padding: 12px 24px; text-decoration: none; border-radius: 8px; margin-bottom: 20px; }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <a href="/absence" class="back-btn">← Voltar às Configurações</a>
+            
+            <div class="header">
+                <h1>➕ Adicionar Configuração de Ausência</h1>
+            </div>
+            
+            <div class="form-card">
+                <form method="POST">
+                    <div class="form-group">
+                        <label for="name">Nome da configuração:</label>
+                        <input type="text" id="name" name="name" required>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="message">Mensagem de ausência:</label>
+                        <textarea id="message" name="message" required></textarea>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="start_time">Horário de início:</label>
+                        <input type="time" id="start_time" name="start_time" required>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="end_time">Horário de fim:</label>
+                        <input type="time" id="end_time" name="end_time" required>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label>Dias da semana:</label>
+                        <div class="days-group">
+                            <div class="checkbox-group">
+                                <input type="checkbox" id="day_0" name="days_of_week" value="0">
+                                <label for="day_0">Segunda</label>
+                            </div>
+                            <div class="checkbox-group">
+                                <input type="checkbox" id="day_1" name="days_of_week" value="1">
+                                <label for="day_1">Terça</label>
+                            </div>
+                            <div class="checkbox-group">
+                                <input type="checkbox" id="day_2" name="days_of_week" value="2">
+                                <label for="day_2">Quarta</label>
+                            </div>
+                            <div class="checkbox-group">
+                                <input type="checkbox" id="day_3" name="days_of_week" value="3">
+                                <label for="day_3">Quinta</label>
+                            </div>
+                            <div class="checkbox-group">
+                                <input type="checkbox" id="day_4" name="days_of_week" value="4">
+                                <label for="day_4">Sexta</label>
+                            </div>
+                            <div class="checkbox-group">
+                                <input type="checkbox" id="day_5" name="days_of_week" value="5">
+                                <label for="day_5">Sábado</label>
+                            </div>
+                            <div class="checkbox-group">
+                                <input type="checkbox" id="day_6" name="days_of_week" value="6">
+                                <label for="day_6">Domingo</label>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="form-group">
+                        <div class="checkbox-group">
+                            <input type="checkbox" id="is_active" name="is_active" checked>
+                            <label for="is_active">Configuração ativa</label>
+                        </div>
+                    </div>
+                    
+                    <div class="btn-group">
+                        <button type="submit" class="btn btn-primary">💾 Salvar Configuração</button>
+                        <a href="/absence" class="btn btn-secondary">❌ Cancelar</a>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </body>
+    </html>
+    """
+    return html
+
+@app.route('/absence/toggle/<int:config_id>')
+def toggle_absence(config_id):
+    if not _initialized:
+        initialize_database()
+    
+    user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
+    if not user:
+        return "❌ Usuário não encontrado", 404
+    
+    config = AbsenceConfig.query.filter_by(id=config_id, user_id=user.id).first()
+    if config:
+        config.is_active = not config.is_active
+        db.session.commit()
+    
+    return redirect('/absence')
 
 # Webhook para receber notificações do Mercado Livre
 @app.route('/api/ml/webhook', methods=['GET', 'POST'])
