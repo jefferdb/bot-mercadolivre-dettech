@@ -174,7 +174,6 @@ class AbsenceConfig(db.Model):
     days_of_week = db.Column(db.String(20), nullable=False)  # 0,1,2,3,4,5,6
     is_active = db.Column(db.Boolean, default=True)
     created_at = db.Column(db.DateTime, default=get_local_time_utc)
-    updated_at = db.Column(db.DateTime, default=get_local_time_utc, onupdate=get_local_time_utc)
 
 class ResponseHistory(db.Model):
     """Histórico de respostas enviadas"""
@@ -1495,12 +1494,12 @@ def history_page():
     """Página de histórico de respostas"""
     try:
         with app.app_context():
-            # Buscar histórico com joins
+            # Buscar histórico com joins - CORRIGIDO
             history_query = db.session.query(
                 ResponseHistory,
                 Question,
                 User
-            ).join(Question).join(User).order_by(ResponseHistory.created_at.desc()).limit(100)
+            ).select_from(ResponseHistory).join(Question).join(User).order_by(ResponseHistory.created_at.desc()).limit(100)
             
             history_records = history_query.all()
             
@@ -2071,7 +2070,6 @@ def api_toggle_absence(config_id):
                 return jsonify({"error": "Configuração não encontrada"}), 404
             
             config.is_active = not config.is_active
-            config.updated_at = get_local_time_utc()
             db.session.commit()
             
             status = "ativada" if config.is_active else "desativada"
