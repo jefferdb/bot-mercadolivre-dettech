@@ -53,12 +53,12 @@ ML_ACCESS_TOKEN = os.getenv('ML_ACCESS_TOKEN', 'APP_USR-5510376630479325-072511-
 ML_USER_ID = os.getenv('ML_USER_ID', '180617463')
 ML_REFRESH_TOKEN = os.getenv('ML_REFRESH_TOKEN', 'TG-68839d65f4c795000...')
 
-# URLs de redirect possíveis (para flexibilidade)
+# URLs de redirect possíveis (para flexibilidade) - WEBHOOK COMO PADRÃO
 REDIRECT_URIS = [
-    "https://bot-mercadolivre-dettech.onrender.com/api/ml/auth-callback",
     "https://bot-mercadolivre-dettech.onrender.com/api/ml/webhook",
-    "http://localhost:5000/api/ml/auth-callback",
-    "http://localhost:5000/api/ml/webhook"
+    "https://bot-mercadolivre-dettech.onrender.com/api/ml/auth-callback",
+    "http://localhost:5000/api/ml/webhook",
+    "http://localhost:5000/api/ml/auth-callback"
 ]
 
 # Variáveis globais para status do token
@@ -342,9 +342,9 @@ def make_ml_request(url, method='GET', headers=None, data=None, max_retries=1):
 # ========== SISTEMA DE RENOVAÇÃO DE TOKENS FLEXÍVEL ==========
 
 def generate_auth_url(redirect_uri=None):
-    """Gera URL para autorização no Mercado Livre com redirect_uri flexível"""
-    if redirect_uri is None:
-        redirect_uri = REDIRECT_URIS[0]  # Usar o primeiro como padrão
+    """Gera URL para autorização no Mercado Livre com redirect_uri FORÇADO para webhook"""
+    # FORÇAR uso do webhook - ignorar parâmetro redirect_uri
+    redirect_uri = "https://bot-mercadolivre-dettech.onrender.com/api/ml/webhook"
     
     base_url = "https://auth.mercadolivre.com.br/authorization"
     params = {
