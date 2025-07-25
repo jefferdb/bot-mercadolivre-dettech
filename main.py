@@ -451,8 +451,15 @@ def process_questions():
 
 # Função de monitoramento contínuo
 def monitor_questions():
-
-    # Função de monitoramento de token
+    while True:
+        try:
+            with app.app_context():
+                process_questions()
+            time.sleep(60)  # Verificar a cada 60 segundos
+        except Exception as e:
+            print(f"❌ Erro no monitoramento: {e}")
+            time.sleep(60)
+# Função de monitoramento de token
 def monitor_token():
     while True:
         try:
@@ -462,15 +469,6 @@ def monitor_token():
         except Exception as e:
             print(f"❌ Erro no monitoramento de token: {e}")
             time.sleep(3600)
-
-    while True:
-        try:
-            with app.app_context():
-                process_questions()
-            time.sleep(60)  # Verificar a cada 60 segundos
-        except Exception as e:
-            print(f"❌ Erro no monitoramento: {e}")
-            time.sleep(60)
 
 # Rotas da aplicação
 @app.route('/')
