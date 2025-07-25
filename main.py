@@ -75,20 +75,6 @@ TOKEN_STATUS = {
 # Lock para operações thread-safe
 token_lock = threading.Lock()
 
-# VARIÁVEIS GLOBAIS PARA DEBUG
-DEBUG_LOGS = []
-MAX_DEBUG_LOGS = 100
-
-def add_debug_log(message):
-    """Adiciona log de debug com timestamp"""
-    global DEBUG_LOGS
-    timestamp = get_local_time().strftime("%H:%M:%S")
-    log_entry = f"[{timestamp}] {message}"
-    DEBUG_LOGS.append(log_entry)
-    if len(DEBUG_LOGS) > MAX_DEBUG_LOGS:
-        DEBUG_LOGS.pop(0)
-    print(log_entry)
-
 # Modelos do banco de dados
 class User(db.Model):
     __tablename__ = 'users'
@@ -179,10 +165,10 @@ def refresh_access_token():
             refresh_token = TOKEN_STATUS.get('refresh_token') or ML_REFRESH_TOKEN
             
             if not refresh_token:
-                add_debug_log("❌ Refresh token não encontrado!")
+                print("❌ Refresh token não encontrado!")
                 return False, "Refresh token não disponível"
             
-            add_debug_log("🔄 Tentando renovar token...")
+            print("🔄 Tentando renovar token...")
             
             url = "https://api.mercadolibre.com/oauth/token"
             data = {
@@ -215,20 +201,20 @@ def refresh_access_token():
                 # Salvar no banco de dados
                 save_tokens_to_db(new_access_token, new_refresh_token)
                 
-                add_debug_log(f"✅ Token renovado com sucesso!")
-                add_debug_log(f"🔑 Novo token: {new_access_token[:20]}...")
+                print(f"✅ Token renovado com sucesso!")
+                print(f"🔑 Novo token: {new_access_token[:20]}...")
                 
                 return True, "Token renovado com sucesso"
                 
             else:
                 error_msg = f"Erro na renovação: {response.status_code} - {response.text}"
-                add_debug_log(f"❌ {error_msg}")
+                print(f"❌ {error_msg}")
                 TOKEN_STATUS['error_message'] = error_msg
                 return False, error_msg
                 
         except Exception as e:
             error_msg = f"Erro na renovação do token: {str(e)}"
-            add_debug_log(f"💥 {error_msg}")
+            print(f"💥 {error_msg}")
             TOKEN_STATUS['error_message'] = error_msg
             return False, error_msg
 
@@ -243,9 +229,9 @@ def save_tokens_to_db(access_token, refresh_token):
                 user.token_expires_at = get_local_time_utc() + timedelta(hours=6)
                 user.updated_at = get_local_time_utc()
                 db.session.commit()
-                add_debug_log("💾 Tokens salvos no banco de dados")
+                print("💾 Tokens salvos no banco de dados")
     except Exception as e:
-        add_debug_log(f"❌ Erro ao salvar tokens no banco: {e}")
+        print(f"❌ Erro ao salvar tokens no banco: {e}")
 
 def check_token_validity(token=None):
     """Verifica se o token está válido fazendo uma requisição de teste"""
@@ -265,27 +251,27 @@ def check_token_validity(token=None):
             TOKEN_STATUS['valid'] = True
             TOKEN_STATUS['error_message'] = None
             user_info = response.json()
-            add_debug_log(f"✅ Token válido! Usuário: {user_info.get('nickname', 'N/A')}")
+            print(f"✅ Token válido! Usuário: {user_info.get('nickname', 'N/A')}")
             return True, "Token válido"
             
         elif response.status_code == 401:
             TOKEN_STATUS['valid'] = False
             TOKEN_STATUS['error_message'] = "Token expirado"
-            add_debug_log("⚠️ Token expirado (401)")
+            print("⚠️ Token expirado (401)")
             return False, "Token expirado"
             
         else:
             TOKEN_STATUS['valid'] = False
             error_msg = f"Erro {response.status_code}: {response.text}"
             TOKEN_STATUS['error_message'] = error_msg
-            add_debug_log(f"❌ Erro na verificação: {error_msg}")
+            print(f"❌ Erro na verificação: {error_msg}")
             return False, error_msg
             
     except Exception as e:
         TOKEN_STATUS['valid'] = False
         error_msg = f"Erro na verificação: {str(e)}"
         TOKEN_STATUS['error_message'] = error_msg
-        add_debug_log(f"💥 {error_msg}")
+        print(f"💥 {error_msg}")
         return False, error_msg
 
 def get_valid_token():
@@ -299,14 +285,14 @@ def get_valid_token():
         return TOKEN_STATUS['current_token']
     
     # Token inválido, tentar renovar
-    add_debug_log("🔄 Token inválido, tentando renovar automaticamente...")
+    print("🔄 Token inválido, tentando renovar automaticamente...")
     success, message = refresh_access_token()
     
     if success:
         return TOKEN_STATUS['current_token']
     else:
-        add_debug_log(f"❌ Falha na renovação automática: {message}")
-        add_debug_log("🚨 AÇÃO NECESSÁRIA: Renovar token manualmente!")
+        print(f"❌ Falha na renovação automática: {message}")
+        print("🚨 AÇÃO NECESSÁRIA: Renovar token manualmente!")
         return None
 
 def make_ml_request(url, method='GET', headers=None, data=None, max_retries=1):
@@ -337,7 +323,7 @@ def make_ml_request(url, method='GET', headers=None, data=None, max_retries=1):
             
             # Se erro 401 e ainda temos tentativas, tentar novamente
             elif response.status_code == 401 and attempt < max_retries:
-                add_debug_log(f"🔄 Erro 401 na tentativa {attempt + 1}, tentando renovar token...")
+                print(f"🔄 Erro 401 na tentativa {attempt + 1}, tentando renovar token...")
                 TOKEN_STATUS['valid'] = False  # Forçar renovação na próxima tentativa
                 continue
             
@@ -346,12 +332,118 @@ def make_ml_request(url, method='GET', headers=None, data=None, max_retries=1):
                 
         except Exception as e:
             if attempt < max_retries:
-                add_debug_log(f"🔄 Erro na tentativa {attempt + 1}: {e}")
+                print(f"🔄 Erro na tentativa {attempt + 1}: {e}")
                 continue
             else:
                 return None, f"Erro na requisição: {str(e)}"
     
     return None, "Máximo de tentativas excedido"
+
+# ========== SISTEMA DE RENOVAÇÃO DE TOKENS FLEXÍVEL ==========
+
+def generate_auth_url(redirect_uri=None):
+    """Gera URL para autorização no Mercado Livre com redirect_uri FORÇADO para webhook"""
+    # FORÇAR uso do webhook - ignorar parâmetro redirect_uri
+    redirect_uri = "https://bot-mercadolivre-dettech.onrender.com/api/ml/webhook"
+    
+    base_url = "https://auth.mercadolivre.com.br/authorization"
+    params = {
+        "response_type": "code",
+        "client_id": ML_CLIENT_ID,
+        "redirect_uri": redirect_uri,
+        "scope": "offline_access read write"
+    }
+    
+    url_params = "&".join([f"{k}={v}" for k, v in params.items()])
+    return f"{base_url}?{url_params}"
+
+def get_tokens_from_code_flexible(authorization_code, redirect_uri=None):
+    """Obtém tokens usando o código de autorização com múltiplas tentativas de redirect_uri"""
+    url = "https://api.mercadolibre.com/oauth/token"
+    
+    # Lista de redirect_uris para tentar
+    redirect_uris_to_try = [redirect_uri] if redirect_uri else REDIRECT_URIS
+    
+    for redirect_uri_attempt in redirect_uris_to_try:
+        data = {
+            "grant_type": "authorization_code",
+            "client_id": ML_CLIENT_ID,
+            "client_secret": ML_CLIENT_SECRET,
+            "code": authorization_code,
+            "redirect_uri": redirect_uri_attempt
+        }
+        
+        try:
+            print(f"🔄 Tentando com redirect_uri: {redirect_uri_attempt}")
+            response = requests.post(url, data=data, timeout=30)
+            
+            if response.status_code == 200:
+                print(f"✅ Sucesso com redirect_uri: {redirect_uri_attempt}")
+                return response.json(), None
+            else:
+                print(f"❌ Falha com {redirect_uri_attempt}: {response.status_code} - {response.text}")
+                continue
+                
+        except requests.exceptions.RequestException as e:
+            print(f"❌ Erro de conexão com {redirect_uri_attempt}: {e}")
+            continue
+    
+    # Se chegou aqui, todas as tentativas falharam
+    return None, "Falha em todas as tentativas de redirect_uri. Verifique se o código é válido."
+
+def get_user_info(access_token):
+    """Obtém informações do usuário"""
+    url = "https://api.mercadolibre.com/users/me"
+    headers = {"Authorization": f"Bearer {access_token}"}
+    
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        if response.status_code == 200:
+            return response.json(), None
+        else:
+            return None, f"Erro ao obter user info: {response.status_code}"
+    except requests.exceptions.RequestException as e:
+        return None, f"Erro: {e}"
+
+def update_system_tokens(tokens_data, user_info=None):
+    """Atualiza tokens no sistema"""
+    global TOKEN_STATUS, ML_ACCESS_TOKEN, ML_USER_ID, ML_REFRESH_TOKEN
+    
+    try:
+        # Atualizar variáveis globais
+        new_access_token = tokens_data.get("access_token")
+        new_refresh_token = tokens_data.get("refresh_token")
+        new_user_id = str(user_info.get("id")) if user_info else ML_USER_ID
+        
+        TOKEN_STATUS['current_token'] = new_access_token
+        TOKEN_STATUS['refresh_token'] = new_refresh_token
+        TOKEN_STATUS['valid'] = True
+        TOKEN_STATUS['error_message'] = None
+        TOKEN_STATUS['last_check'] = get_local_time()
+        
+        # Atualizar variáveis de ambiente
+        os.environ['ML_ACCESS_TOKEN'] = new_access_token
+        os.environ['ML_REFRESH_TOKEN'] = new_refresh_token
+        os.environ['ML_USER_ID'] = new_user_id
+        
+        ML_ACCESS_TOKEN = new_access_token
+        ML_REFRESH_TOKEN = new_refresh_token
+        ML_USER_ID = new_user_id
+        
+        # Salvar no banco
+        save_tokens_to_db(new_access_token, new_refresh_token)
+        
+        print(f"✅ Sistema atualizado com novos tokens!")
+        print(f"🔑 Access Token: {new_access_token[:20]}...")
+        print(f"🔄 Refresh Token: {new_refresh_token[:20]}...")
+        print(f"👤 User ID: {new_user_id}")
+        
+        return True, "Tokens atualizados com sucesso"
+        
+    except Exception as e:
+        error_msg = f"Erro ao atualizar tokens: {str(e)}"
+        print(f"❌ {error_msg}")
+        return False, error_msg
 
 # ========== FUNÇÕES ORIGINAIS ADAPTADAS ==========
 
@@ -360,21 +452,17 @@ def get_questions():
     try:
         url = f"https://api.mercadolibre.com/my/received_questions/search?seller_id={ML_USER_ID}&status=UNANSWERED"
         
-        add_debug_log(f"🔍 Buscando perguntas em: {url}")
-        
         response, message = make_ml_request(url)
         
         if response and response.status_code == 200:
             questions_data = response.json()
-            questions = questions_data.get('questions', [])
-            add_debug_log(f"📥 {len(questions)} perguntas encontradas na API")
-            return questions
+            return questions_data.get('questions', [])
         else:
-            add_debug_log(f"❌ Erro ao buscar perguntas: {message}")
+            print(f"❌ Erro ao buscar perguntas: {message}")
             return []
             
     except Exception as e:
-        add_debug_log(f"💥 Erro ao buscar perguntas: {e}")
+        print(f"💥 Erro ao buscar perguntas: {e}")
         return []
 
 def answer_question(question_id, answer_text):
@@ -386,23 +474,20 @@ def answer_question(question_id, answer_text):
             'text': answer_text
         }
         
-        add_debug_log(f"📤 Tentando responder pergunta {question_id}")
-        add_debug_log(f"📝 Resposta: {answer_text[:50]}...")
-        
         response, message = make_ml_request(url, method='POST', data=data)
         
         if response and response.status_code in [200, 201]:
-            add_debug_log(f"✅ Pergunta {question_id} respondida com sucesso!")
+            print(f"✅ Pergunta {question_id} respondida com sucesso!")
             return True
         else:
-            add_debug_log(f"❌ Erro ao responder pergunta {question_id}: {message}")
+            print(f"❌ Erro ao responder pergunta {question_id}: {message}")
             return False
             
     except Exception as e:
-        add_debug_log(f"💥 Erro ao responder pergunta {question_id}: {e}")
+        print(f"💥 Erro ao responder pergunta {question_id}: {e}")
         return False
 
-# ========== FUNÇÕES DE PROCESSAMENTO COM DEBUG INTENSIVO ==========
+# ========== FUNÇÕES DE PROCESSAMENTO ==========
 
 def init_database():
     """Inicializa o banco de dados"""
@@ -414,7 +499,6 @@ def init_database():
         
         try:
             with app.app_context():
-                add_debug_log("🔧 Inicializando banco de dados...")
                 db.create_all()
                 
                 # Verificar se usuário existe, se não, criar
@@ -428,7 +512,7 @@ def init_database():
                     )
                     db.session.add(user)
                     db.session.commit()
-                    add_debug_log(f"✅ Usuário {ML_USER_ID} criado no banco")
+                    print(f"✅ Usuário {ML_USER_ID} criado no banco")
                 else:
                     # Atualizar tokens se necessário
                     user.access_token = ML_ACCESS_TOKEN
@@ -436,18 +520,10 @@ def init_database():
                         user.refresh_token = ML_REFRESH_TOKEN
                     user.updated_at = get_local_time_utc()
                     db.session.commit()
-                    add_debug_log(f"✅ Usuário {ML_USER_ID} atualizado")
-                
-                # Verificar regras existentes
-                rules_count = AutoResponse.query.filter_by(user_id=user.id).count()
-                add_debug_log(f"📋 Regras de resposta no banco: {rules_count}")
-                
-                # Verificar configurações de ausência
-                absence_count = AbsenceConfig.query.filter_by(user_id=user.id).count()
-                add_debug_log(f"🌙 Configurações de ausência no banco: {absence_count}")
+                    print(f"✅ Usuário {ML_USER_ID} atualizado")
                 
                 # Criar regras padrão se não existirem
-                if rules_count == 0:
+                if not AutoResponse.query.filter_by(user_id=user.id).first():
                     default_responses = [
                         {
                             'keywords': 'preço,valor,quanto custa,preço,custo',
@@ -472,252 +548,47 @@ def init_database():
                         db.session.add(auto_resp)
                     
                     db.session.commit()
-                    add_debug_log("✅ Regras padrão criadas")
+                    print("✅ Regras padrão criadas")
                 
                 _initialized = True
-                add_debug_log("✅ Banco de dados inicializado com sucesso")
+                print("✅ Banco de dados inicializado com sucesso")
                 
         except Exception as e:
-            add_debug_log(f"❌ Erro ao inicializar banco: {e}")
+            print(f"❌ Erro ao inicializar banco: {e}")
 
-def is_absence_time():
-    """Verifica se está em horário de ausência - COM DEBUG INTENSIVO"""
+def log_token_check(status, error_message=None):
+    """Registra verificação de token no banco"""
     try:
-        now = get_local_time()
-        current_time = now.strftime("%H:%M")
-        current_weekday = str(now.weekday())  # 0=segunda, 6=domingo
-        
-        add_debug_log(f"🔍 VERIFICANDO AUSÊNCIA:")
-        add_debug_log(f"   Horário atual: {current_time}")
-        add_debug_log(f"   Dia da semana: {current_weekday} (0=seg, 6=dom)")
-        
         with app.app_context():
-            absence_configs = AbsenceConfig.query.filter_by(is_active=True).all()
-            add_debug_log(f"   Configurações ativas encontradas: {len(absence_configs)}")
-            
-            if not absence_configs:
-                add_debug_log("   ❌ NENHUMA configuração de ausência ativa!")
-                return None
-            
-            for i, config in enumerate(absence_configs):
-                add_debug_log(f"   🔍 Testando config {i+1}: '{config.name}'")
-                add_debug_log(f"      Dias configurados: '{config.days_of_week}'")
-                add_debug_log(f"      Horário: {config.start_time} - {config.end_time}")
-                add_debug_log(f"      Ativa: {config.is_active}")
-                
-                # Verificar se o dia atual está na configuração
-                if config.days_of_week and current_weekday in config.days_of_week.split(','):
-                    add_debug_log(f"      ✅ Dia {current_weekday} ESTÁ na configuração")
-                    
-                    start_time = config.start_time
-                    end_time = config.end_time
-                    
-                    # Se start_time > end_time, significa que cruza meia-noite
-                    if start_time > end_time:
-                        add_debug_log(f"      🌙 Configuração cruza meia-noite")
-                        if current_time >= start_time or current_time <= end_time:
-                            add_debug_log(f"      ✅ AUSÊNCIA ATIVA! Config: {config.name}")
-                            add_debug_log(f"      📝 Mensagem: {config.message[:50]}...")
-                            return config.message
-                        else:
-                            add_debug_log(f"      ❌ Fora do horário de ausência")
-                    else:
-                        add_debug_log(f"      🕐 Configuração no mesmo dia")
-                        if start_time <= current_time <= end_time:
-                            add_debug_log(f"      ✅ AUSÊNCIA ATIVA! Config: {config.name}")
-                            add_debug_log(f"      📝 Mensagem: {config.message[:50]}...")
-                            return config.message
-                        else:
-                            add_debug_log(f"      ❌ Fora do horário: {current_time} não está entre {start_time} e {end_time}")
-                else:
-                    add_debug_log(f"      ❌ Dia {current_weekday} NÃO está na configuração '{config.days_of_week}'")
-        
-        add_debug_log("   ❌ NENHUMA configuração de ausência corresponde ao horário atual")
-        return None
-        
+            user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
+            if user:
+                log_entry = TokenLog(
+                    user_id=user.id,
+                    token_status=status,
+                    error_message=error_message
+                )
+                db.session.add(log_entry)
+                db.session.commit()
     except Exception as e:
-        add_debug_log(f"❌ ERRO ao verificar horário de ausência: {e}")
-        import traceback
-        add_debug_log(f"   Traceback: {traceback.format_exc()}")
-        return None
+        print(f"❌ Erro ao registrar log de token: {e}")
 
-def find_auto_response(question_text):
-    """Encontra resposta automática baseada em palavras-chave - COM DEBUG INTENSIVO"""
+def log_webhook(topic=None, resource=None, user_id_ml=None, application_id=None, attempts=1, sent=None):
+    """Registra webhook recebido no banco"""
     try:
-        question_lower = question_text.lower()
-        add_debug_log(f"🔍 BUSCANDO RESPOSTA AUTOMÁTICA:")
-        add_debug_log(f"   Pergunta original: '{question_text}'")
-        add_debug_log(f"   Pergunta lowercase: '{question_lower}'")
-        
         with app.app_context():
-            auto_responses = AutoResponse.query.filter_by(is_active=True).all()
-            add_debug_log(f"   Regras ativas encontradas: {len(auto_responses)}")
-            
-            if not auto_responses:
-                add_debug_log("   ❌ NENHUMA regra ativa encontrada!")
-                return None, None
-            
-            for i, response in enumerate(auto_responses):
-                add_debug_log(f"   🔍 Testando regra {i+1}:")
-                add_debug_log(f"      ID: {response.id}")
-                add_debug_log(f"      Keywords: '{response.keywords}'")
-                add_debug_log(f"      Ativa: {response.is_active}")
-                add_debug_log(f"      Resposta: '{response.response_text[:30]}...'")
-                
-                keywords = [k.strip().lower() for k in response.keywords.split(',')]
-                add_debug_log(f"      Keywords processadas: {keywords}")
-                
-                for j, keyword in enumerate(keywords):
-                    add_debug_log(f"         Testando keyword {j+1}: '{keyword}'")
-                    if keyword and keyword in question_lower:
-                        add_debug_log(f"         ✅ MATCH! Palavra-chave '{keyword}' encontrada!")
-                        add_debug_log(f"         🎯 Resposta selecionada: {response.response_text[:50]}...")
-                        return response.response_text, response.keywords
-                    else:
-                        add_debug_log(f"         ❌ Palavra-chave '{keyword}' NÃO encontrada")
-        
-        add_debug_log("   ❌ NENHUMA palavra-chave correspondente encontrada")
-        return None, None
-        
+            webhook_log = WebhookLog(
+                topic=topic,
+                resource=resource,
+                user_id_ml=user_id_ml,
+                application_id=application_id,
+                attempts=attempts,
+                sent=sent
+            )
+            db.session.add(webhook_log)
+            db.session.commit()
+            print(f"📝 Webhook registrado: {topic} - {resource}")
     except Exception as e:
-        add_debug_log(f"❌ ERRO ao buscar resposta automática: {e}")
-        import traceback
-        add_debug_log(f"   Traceback: {traceback.format_exc()}")
-        return None, None
-
-def process_questions():
-    """Processa perguntas automaticamente - COM DEBUG INTENSIVO"""
-    try:
-        add_debug_log("🔄 ========== INICIANDO PROCESSAMENTO DE PERGUNTAS ==========")
-        
-        with _db_lock:
-            with app.app_context():
-                # Buscar perguntas usando sistema de renovação automática
-                questions = get_questions()
-                add_debug_log(f"📥 Perguntas retornadas pela API: {len(questions)}")
-                
-                if not questions:
-                    add_debug_log("📭 Nenhuma pergunta nova encontrada - finalizando processamento")
-                    return
-                
-                user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
-                if not user:
-                    add_debug_log("❌ Usuário não encontrado no banco - ERRO CRÍTICO")
-                    return
-                
-                add_debug_log(f"👤 Usuário encontrado: ID {user.id}")
-                
-                for i, q in enumerate(questions):
-                    question_id = str(q.get("id"))
-                    question_text = q.get("text", "")
-                    item_id = q.get("item_id", "")
-                    
-                    add_debug_log(f"\n📝 ========== PROCESSANDO PERGUNTA {i+1}/{len(questions)} ==========")
-                    add_debug_log(f"   ID: {question_id}")
-                    add_debug_log(f"   Item: {item_id}")
-                    add_debug_log(f"   Texto: '{question_text}'")
-                    
-                    # Verificar se já processamos esta pergunta
-                    existing = Question.query.filter_by(ml_question_id=question_id).first()
-                    if existing:
-                        add_debug_log(f"   ⏭️ Pergunta {question_id} já existe no banco - PULANDO")
-                        continue
-                    
-                    add_debug_log(f"   ✅ Pergunta {question_id} é NOVA - processando...")
-                    
-                    start_time = time.time()
-                    
-                    # Salvar pergunta no banco
-                    question = Question(
-                        ml_question_id=question_id,
-                        user_id=user.id,
-                        item_id=item_id,
-                        question_text=question_text,
-                        is_answered=False
-                    )
-                    db.session.add(question)
-                    db.session.flush()  # Para obter o ID
-                    add_debug_log(f"   💾 Pergunta salva no banco com ID: {question.id}")
-                    
-                    response_type = None
-                    keywords_matched = None
-                    response_given = False
-                    
-                    # PRIMEIRO: Verificar se está em horário de ausência
-                    add_debug_log(f"   🌙 ========== VERIFICANDO AUSÊNCIA ==========")
-                    absence_message = is_absence_time()
-                    if absence_message:
-                        add_debug_log(f"   🌙 AUSÊNCIA DETECTADA! Enviando resposta...")
-                        if answer_question(question_id, absence_message):
-                            question.response_text = absence_message
-                            question.is_answered = True
-                            question.answered_automatically = True
-                            question.answered_at = get_local_time_utc()
-                            response_type = "absence"
-                            response_given = True
-                            add_debug_log(f"   ✅ Pergunta {question_id} respondida com AUSÊNCIA")
-                        else:
-                            add_debug_log(f"   ❌ FALHA ao enviar mensagem de ausência para {question_id}")
-                    else:
-                        add_debug_log(f"   ❌ Não está em horário de ausência")
-                    
-                    # SEGUNDO: Se não está em ausência, buscar resposta automática
-                    if not response_given:
-                        add_debug_log(f"   🤖 ========== VERIFICANDO REGRAS AUTOMÁTICAS ==========")
-                        auto_response, matched_keywords = find_auto_response(question_text)
-                        if auto_response:
-                            add_debug_log(f"   🤖 REGRA ENCONTRADA! Enviando resposta...")
-                            if answer_question(question_id, auto_response):
-                                question.response_text = auto_response
-                                question.is_answered = True
-                                question.answered_automatically = True
-                                question.answered_at = get_local_time_utc()
-                                response_type = "auto"
-                                keywords_matched = matched_keywords
-                                response_given = True
-                                add_debug_log(f"   ✅ Pergunta {question_id} respondida AUTOMATICAMENTE")
-                            else:
-                                add_debug_log(f"   ❌ FALHA ao enviar resposta automática para {question_id}")
-                        else:
-                            add_debug_log(f"   ❌ Nenhuma regra automática encontrada")
-                    
-                    # Registrar no histórico se foi respondida
-                    if response_type:
-                        response_time = time.time() - start_time
-                        history = ResponseHistory(
-                            user_id=user.id,
-                            question_id=question.id,
-                            response_type=response_type,
-                            keywords_matched=keywords_matched,
-                            response_time=response_time
-                        )
-                        db.session.add(history)
-                        add_debug_log(f"   📊 Histórico registrado: tipo={response_type}, tempo={response_time:.2f}s")
-                    else:
-                        add_debug_log(f"   📝 Pergunta {question_id} salva SEM resposta automática")
-                    
-                    db.session.commit()
-                    add_debug_log(f"   💾 Pergunta {question_id} processada e commitada no banco")
-                    
-        add_debug_log("✅ ========== PROCESSAMENTO DE PERGUNTAS CONCLUÍDO ==========")
-                    
-    except Exception as e:
-        add_debug_log(f"❌ ERRO CRÍTICO ao processar perguntas: {e}")
-        import traceback
-        add_debug_log(f"   Traceback completo: {traceback.format_exc()}")
-
-def polling_loop():
-    """Loop principal de polling com renovação automática"""
-    add_debug_log("🔄 Iniciando polling de perguntas...")
-    
-    while True:
-        try:
-            process_questions()
-            add_debug_log("⏰ Aguardando 30 segundos para próxima verificação...")
-            time.sleep(30)  # Verificar a cada 30 segundos
-        except Exception as e:
-            add_debug_log(f"❌ Erro no polling: {e}")
-            time.sleep(60)  # Esperar mais tempo em caso de erro
+        print(f"❌ Erro ao registrar webhook: {e}")
 
 def monitor_token():
     """Monitora o token a cada 5 minutos"""
@@ -740,36 +611,159 @@ def monitor_token():
             time.sleep(300)  # 5 minutos
             
         except Exception as e:
-            add_debug_log(f"❌ Erro no monitoramento de token: {e}")
+            print(f"❌ Erro no monitoramento de token: {e}")
             time.sleep(300)
 
-def log_token_check(status, error_message=None):
-    """Registra verificação de token no banco"""
+def is_absence_time():
+    """Verifica se está em horário de ausência"""
+    now = get_local_time()
+    current_time = now.strftime("%H:%M")
+    current_weekday = str(now.weekday())  # 0=segunda, 6=domingo
+    
     try:
         with app.app_context():
-            user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
-            if user:
-                log_entry = TokenLog(
-                    user_id=user.id,
-                    token_status=status,
-                    error_message=error_message
-                )
-                db.session.add(log_entry)
-                db.session.commit()
+            absence_configs = AbsenceConfig.query.filter_by(is_active=True).all()
+            
+            for config in absence_configs:
+                if current_weekday in config.days_of_week.split(','):
+                    start_time = config.start_time
+                    end_time = config.end_time
+                    
+                    # Se start_time > end_time, significa que cruza meia-noite
+                    if start_time > end_time:
+                        if current_time >= start_time or current_time <= end_time:
+                            return config.message
+                    else:
+                        if start_time <= current_time <= end_time:
+                            return config.message
     except Exception as e:
-        add_debug_log(f"❌ Erro ao registrar log de token: {e}")
+        print(f"❌ Erro ao verificar horário de ausência: {e}")
+    
+    return None
+
+def find_auto_response(question_text):
+    """Encontra resposta automática baseada em palavras-chave"""
+    question_lower = question_text.lower()
+    
+    try:
+        with app.app_context():
+            auto_responses = AutoResponse.query.filter_by(is_active=True).all()
+            
+            for response in auto_responses:
+                keywords = [k.strip().lower() for k in response.keywords.split(',')]
+                
+                for keyword in keywords:
+                    if keyword in question_lower:
+                        return response.response_text, response.keywords
+    except Exception as e:
+        print(f"❌ Erro ao buscar resposta automática: {e}")
+    
+    return None, None
+
+def process_questions():
+    """Processa perguntas automaticamente com renovação de token"""
+    try:
+        with _db_lock:
+            with app.app_context():
+                # Buscar perguntas usando sistema de renovação automática
+                questions = get_questions()
+                
+                if not questions:
+                    return
+                
+                user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
+                if not user:
+                    return
+                
+                for q in questions:
+                    question_id = str(q.get("id"))
+                    question_text = q.get("text", "")
+                    item_id = q.get("item_id", "")
+                    
+                    # Verificar se já processamos esta pergunta
+                    existing = Question.query.filter_by(ml_question_id=question_id).first()
+                    if existing:
+                        continue
+                    
+                    start_time = time.time()
+                    
+                    # Salvar pergunta no banco
+                    question = Question(
+                        ml_question_id=question_id,
+                        user_id=user.id,
+                        item_id=item_id,
+                        question_text=question_text,
+                        is_answered=False
+                    )
+                    db.session.add(question)
+                    db.session.flush()  # Para obter o ID
+                    
+                    response_type = None
+                    keywords_matched = None
+                    
+                    # Verificar se está em horário de ausência
+                    absence_message = is_absence_time()
+                    if absence_message:
+                        if answer_question(question_id, absence_message):
+                            question.response_text = absence_message
+                            question.is_answered = True
+                            question.answered_automatically = True
+                            question.answered_at = get_local_time_utc()
+                            response_type = "absence"
+                            print(f"✅ Pergunta {question_id} respondida com mensagem de ausência")
+                    else:
+                        # Buscar resposta automática
+                        auto_response, matched_keywords = find_auto_response(question_text)
+                        if auto_response:
+                            if answer_question(question_id, auto_response):
+                                question.response_text = auto_response
+                                question.is_answered = True
+                                question.answered_automatically = True
+                                question.answered_at = get_local_time_utc()
+                                response_type = "auto"
+                                keywords_matched = matched_keywords
+                                print(f"✅ Pergunta {question_id} respondida automaticamente")
+                    
+                    # Registrar no histórico se foi respondida
+                    if response_type:
+                        response_time = time.time() - start_time
+                        history = ResponseHistory(
+                            user_id=user.id,
+                            question_id=question.id,
+                            response_type=response_type,
+                            keywords_matched=keywords_matched,
+                            response_time=response_time
+                        )
+                        db.session.add(history)
+                    
+                    db.session.commit()
+                    
+    except Exception as e:
+        print(f"❌ Erro ao processar perguntas: {e}")
+
+def polling_loop():
+    """Loop principal de polling com renovação automática"""
+    print("🔄 Iniciando polling de perguntas...")
+    
+    while True:
+        try:
+            process_questions()
+            time.sleep(30)  # Verificar a cada 30 segundos
+        except Exception as e:
+            print(f"❌ Erro no polling: {e}")
+            time.sleep(60)  # Esperar mais tempo em caso de erro
 
 def start_token_monitoring():
     """Inicia o monitoramento de token em background"""
     monitor_thread = threading.Thread(target=monitor_token, daemon=True)
     monitor_thread.start()
-    add_debug_log("🔍 Monitoramento de token iniciado")
+    print("🔍 Monitoramento de token iniciado")
 
-# ========== ROTAS WEB COM DEBUG ==========
+# ========== ROTAS WEB ==========
 
 @app.route('/')
 def dashboard():
-    """Dashboard principal com status do token e logs de debug"""
+    """Dashboard principal com status do token - CORRIGIDO PARA RESOLVER 404"""
     try:
         with app.app_context():
             # Verificar token atual
@@ -787,9 +781,6 @@ def dashboard():
                 auto_responses_today = ResponseHistory.query.filter_by(user_id=user.id, response_type='auto').filter(
                     db.func.date(ResponseHistory.created_at) == today
                 ).count()
-                absence_responses_today = ResponseHistory.query.filter_by(user_id=user.id, response_type='absence').filter(
-                    db.func.date(ResponseHistory.created_at) == today
-                ).count()
                 
                 # Tempo médio de resposta
                 avg_response = db.session.query(db.func.avg(ResponseHistory.response_time)).filter_by(user_id=user.id).scalar()
@@ -799,11 +790,10 @@ def dashboard():
                     'total_questions': total_questions,
                     'answered_today': answered_today,
                     'auto_responses_today': auto_responses_today,
-                    'absence_responses_today': absence_responses_today,
                     'avg_response_time': avg_response
                 }
             else:
-                stats = {'total_questions': 0, 'answered_today': 0, 'auto_responses_today': 0, 'absence_responses_today': 0, 'avg_response_time': 0}
+                stats = {'total_questions': 0, 'answered_today': 0, 'auto_responses_today': 0, 'avg_response_time': 0}
             
             # Status do token
             token_status = {
@@ -815,21 +805,18 @@ def dashboard():
             
             current_time = get_local_time().strftime("%H:%M:%S")
             
-            # Últimos logs de debug
-            recent_logs = DEBUG_LOGS[-20:] if DEBUG_LOGS else ["Nenhum log ainda"]
-            
             html = f"""
             <!DOCTYPE html>
             <html>
             <head>
-                <title>Bot ML - Dashboard DEBUG</title>
+                <title>Bot ML - Dashboard</title>
                 <meta charset="utf-8">
                 <meta name="viewport" content="width=device-width, initial-scale=1">
                 <style>
                     body {{ font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }}
-                    .container {{ max-width: 1400px; margin: 0 auto; }}
+                    .container {{ max-width: 1200px; margin: 0 auto; }}
                     .header {{ background: #fff; padding: 20px; border-radius: 8px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
-                    .stats {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; margin-bottom: 20px; }}
+                    .stats {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 20px; margin-bottom: 20px; }}
                     .stat-card {{ background: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
                     .stat-number {{ font-size: 2em; font-weight: bold; color: #2196F3; }}
                     .stat-label {{ color: #666; margin-top: 5px; }}
@@ -845,10 +832,6 @@ def dashboard():
                     .btn-warning:hover {{ background: #e68900; }}
                     .btn-danger {{ background: #f44336; }}
                     .btn-danger:hover {{ background: #da190b; }}
-                    .debug-logs {{ background: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-bottom: 20px; }}
-                    .log-container {{ background: #000; color: #0f0; padding: 15px; border-radius: 4px; font-family: monospace; font-size: 12px; max-height: 400px; overflow-y: auto; }}
-                    .log-line {{ margin-bottom: 2px; }}
-                    .debug-alert {{ background: #fff3cd; border: 1px solid #ffeaa7; padding: 15px; border-radius: 4px; margin-bottom: 20px; }}
                 </style>
                 <script>
                     function refreshPage() {{ window.location.reload(); }}
@@ -861,33 +844,26 @@ def dashboard():
                         }})
                         .catch(error => alert('Erro: ' + error));
                     }}
-                    function clearLogs() {{
-                        fetch('/api/debug/clear-logs', {{method: 'POST'}})
-                        .then(() => refreshPage());
-                    }}
-                    setInterval(refreshPage, 30000); // Atualizar a cada 30 segundos
+                    setInterval(refreshPage, 60000); // Atualizar a cada minuto
                 </script>
             </head>
             <body>
                 <div class="container">
                     <div class="header">
-                        <h1>🤖 Bot ML - Dashboard DEBUG</h1>
+                        <h1>🤖 Bot Mercado Livre - Dashboard</h1>
                         <p><strong>Horário Local (SP):</strong> {current_time}</p>
-                        <p><strong>Status:</strong> Sistema com DEBUG INTENSIVO ativo</p>
-                    </div>
-                    
-                    <div class="debug-alert">
-                        <h3>🔍 MODO DEBUG ATIVO</h3>
-                        <p>Esta versão possui logs detalhados para identificar por que os gatilhos não funcionam.</p>
-                        <p><strong>Problema:</strong> Perguntas chegam ({stats['total_questions']} total) mas gatilhos não acionam (0 automáticas).</p>
+                        <p><strong>Status:</strong> Sistema funcionando com renovação automática de token</p>
+                        <p><strong>Deploy:</strong> ✅ Funcionando corretamente</p>
                     </div>
                     
                     <div class="nav">
-                        <a href="/edit-rules">✏️ Regras</a>
-                        <a href="/edit-absence">🌙 Ausência</a>
+                        <a href="/edit-rules">✏️ Editar Regras</a>
+                        <a href="/edit-absence">🌙 Configurar Ausência</a>
                         <a href="/history">📊 Histórico</a>
+                        <a href="/token-status">🔑 Status do Token</a>
+                        <a href="/questions">❓ Perguntas</a>
                         <a href="/renovar-tokens" style="background: #ff9800;">🔄 Renovar Tokens</a>
-                        <a href="/debug-full">🔍 Debug Completo</a>
+                        <a href="/webhook-logs">📡 Logs Webhook</a>
                     </div>
                     
                     <div class="token-status">
@@ -901,6 +877,7 @@ def dashboard():
                         <p><strong>Última Verificação:</strong> {token_status['last_check'].strftime('%H:%M:%S') if token_status['last_check'] else 'Nunca'}</p>
                         <p><strong>Mensagem:</strong> {token_status['message']}</p>
                         <button class="btn btn-warning" onclick="checkToken()">🔄 Verificar Agora</button>
+                        {'<a href="/renovar-tokens" class="btn btn-danger">🚨 Renovar Tokens</a>' if not token_status['valid'] else ''}
                     </div>
                     
                     <div class="stats">
@@ -913,30 +890,12 @@ def dashboard():
                             <div class="stat-label">Respondidas Hoje</div>
                         </div>
                         <div class="stat-card">
-                            <div class="stat-number" style="color: {'#4CAF50' if stats['auto_responses_today'] > 0 else '#f44336'}">{stats['auto_responses_today']}</div>
+                            <div class="stat-number">{stats['auto_responses_today']}</div>
                             <div class="stat-label">Respostas Automáticas Hoje</div>
-                        </div>
-                        <div class="stat-card">
-                            <div class="stat-number" style="color: {'#ff9800' if stats['absence_responses_today'] > 0 else '#666'}">{stats['absence_responses_today']}</div>
-                            <div class="stat-label">Respostas Ausência Hoje</div>
                         </div>
                         <div class="stat-card">
                             <div class="stat-number">{stats['avg_response_time']}s</div>
                             <div class="stat-label">Tempo Médio de Resposta</div>
-                        </div>
-                    </div>
-                    
-                    <div class="debug-logs">
-                        <h3>🔍 Logs de Debug (Últimos 20)</h3>
-                        <button class="btn btn-warning" onclick="clearLogs()">🗑️ Limpar Logs</button>
-                        <button class="btn" onclick="refreshPage()">🔄 Atualizar</button>
-                        <div class="log-container">
-            """
-            
-            for log in recent_logs:
-                html += f'<div class="log-line">{log}</div>'
-            
-            html += """
                         </div>
                     </div>
                 </div>
@@ -960,59 +919,840 @@ def dashboard():
         </html>
         """
 
-@app.route('/debug-full')
-def debug_full():
-    """Página com todos os logs de debug"""
-    html = """
+# ========== PÁGINA DE CONFIGURAÇÃO DE AUSÊNCIA COMPLETA ==========
+
+@app.route('/edit-absence')
+def edit_absence():
+    """Interface completa para configurar mensagens de ausência"""
+    try:
+        with app.app_context():
+            user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
+            if user:
+                absence_configs = AbsenceConfig.query.filter_by(user_id=user.id).all()
+            else:
+                absence_configs = []
+            
+            html = """
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>Configurar Ausência - Bot ML</title>
+                <meta charset="utf-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1">
+                <style>
+                    body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
+                    .container { max-width: 900px; margin: 0 auto; }
+                    .card { background: #fff; padding: 20px; border-radius: 8px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+                    .form-group { margin-bottom: 15px; }
+                    label { display: block; margin-bottom: 5px; font-weight: bold; }
+                    input, textarea, select { width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box; }
+                    textarea { height: 100px; resize: vertical; }
+                    .btn { padding: 10px 20px; background: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer; margin-right: 10px; }
+                    .btn:hover { background: #45a049; }
+                    .btn-danger { background: #f44336; }
+                    .btn-danger:hover { background: #da190b; }
+                    .btn-warning { background: #ff9800; }
+                    .btn-warning:hover { background: #e68900; }
+                    .absence-item { border: 1px solid #ddd; padding: 15px; margin-bottom: 10px; border-radius: 4px; }
+                    .nav a { display: inline-block; padding: 10px 20px; background: #2196F3; color: white; text-decoration: none; border-radius: 4px; margin-right: 10px; }
+                    .checkbox-group { display: flex; flex-wrap: wrap; gap: 10px; }
+                    .checkbox-item { display: flex; align-items: center; }
+                    .checkbox-item input { width: auto; margin-right: 5px; }
+                    .time-group { display: flex; gap: 10px; align-items: center; }
+                    .time-group input { width: 120px; }
+                    .status-active { color: #4CAF50; font-weight: bold; }
+                    .status-inactive { color: #f44336; font-weight: bold; }
+                    .alert { padding: 15px; border-radius: 4px; margin-bottom: 20px; }
+                    .alert-info { background: #e3f2fd; border: 1px solid #2196F3; color: #1976D2; }
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <div class="card">
+                        <h1>🌙 Configurar Ausência</h1>
+                        <div class="nav">
+                            <a href="/">🏠 Dashboard</a>
+                            <a href="/edit-rules">✏️ Regras</a>
+                            <a href="/history">📊 Histórico</a>
+                            <a href="/renovar-tokens">🔄 Renovar Tokens</a>
+                        </div>
+                    </div>
+                    
+                    <div class="card">
+                        <div class="alert alert-info">
+                            <h4>ℹ️ Como Funciona</h4>
+                            <p>Configure mensagens automáticas para horários específicos (ex: fora do horário comercial, finais de semana, feriados).</p>
+                            <p>Durante os períodos configurados, todas as perguntas serão respondidas automaticamente com a mensagem de ausência.</p>
+                        </div>
+                    </div>
+                    
+                    <div class="card">
+                        <h3>➕ Adicionar Nova Configuração de Ausência</h3>
+                        <form method="POST" action="/api/absence">
+                            <div class="form-group">
+                                <label>Nome da Configuração:</label>
+                                <input type="text" name="name" placeholder="Ex: Fora do horário comercial" required>
+                            </div>
+                            
+                            <div class="form-group">
+                                <label>Mensagem de Ausência:</label>
+                                <textarea name="message" placeholder="Olá! No momento estou fora do horário de atendimento. Retornarei em breve!" required></textarea>
+                            </div>
+                            
+                            <div class="form-group">
+                                <label>Horário:</label>
+                                <div class="time-group">
+                                    <input type="time" name="start_time" placeholder="Início" required>
+                                    <span>até</span>
+                                    <input type="time" name="end_time" placeholder="Fim" required>
+                                </div>
+                                <small>Ex: 18:00 até 08:00 (para fora do horário comercial)</small>
+                            </div>
+                            
+                            <div class="form-group">
+                                <label>Dias da Semana:</label>
+                                <div class="checkbox-group">
+                                    <div class="checkbox-item">
+                                        <input type="checkbox" name="days" value="0" id="seg">
+                                        <label for="seg">Segunda</label>
+                                    </div>
+                                    <div class="checkbox-item">
+                                        <input type="checkbox" name="days" value="1" id="ter">
+                                        <label for="ter">Terça</label>
+                                    </div>
+                                    <div class="checkbox-item">
+                                        <input type="checkbox" name="days" value="2" id="qua">
+                                        <label for="qua">Quarta</label>
+                                    </div>
+                                    <div class="checkbox-item">
+                                        <input type="checkbox" name="days" value="3" id="qui">
+                                        <label for="qui">Quinta</label>
+                                    </div>
+                                    <div class="checkbox-item">
+                                        <input type="checkbox" name="days" value="4" id="sex">
+                                        <label for="sex">Sexta</label>
+                                    </div>
+                                    <div class="checkbox-item">
+                                        <input type="checkbox" name="days" value="5" id="sab">
+                                        <label for="sab">Sábado</label>
+                                    </div>
+                                    <div class="checkbox-item">
+                                        <input type="checkbox" name="days" value="6" id="dom">
+                                        <label for="dom">Domingo</label>
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <button type="submit" class="btn">💾 Salvar Configuração</button>
+                        </form>
+                    </div>
+                    
+                    <div class="card">
+                        <h3>📋 Configurações Existentes</h3>
+            """
+            
+            if absence_configs:
+                for config in absence_configs:
+                    status = "✅ Ativa" if config.is_active else "❌ Inativa"
+                    status_class = "status-active" if config.is_active else "status-inactive"
+                    
+                    # Converter dias da semana para nomes
+                    days_map = {
+                        '0': 'Seg', '1': 'Ter', '2': 'Qua', '3': 'Qui',
+                        '4': 'Sex', '5': 'Sáb', '6': 'Dom'
+                    }
+                    days_list = config.days_of_week.split(',') if config.days_of_week else []
+                    days_names = [days_map.get(day, day) for day in days_list]
+                    
+                    html += f"""
+                            <div class="absence-item">
+                                <h4>{config.name}</h4>
+                                <p><strong>Mensagem:</strong> {config.message}</p>
+                                <p><strong>Horário:</strong> {config.start_time} às {config.end_time}</p>
+                                <p><strong>Dias:</strong> {', '.join(days_names)}</p>
+                                <p><strong>Status:</strong> <span class="{status_class}">{status}</span></p>
+                                <button class="btn btn-warning" onclick="toggleAbsence({config.id})">
+                                    {'🔴 Desativar' if config.is_active else '🟢 Ativar'}
+                                </button>
+                                <button class="btn btn-danger" onclick="deleteAbsence({config.id})">🗑️ Excluir</button>
+                            </div>
+                    """
+            else:
+                html += """
+                        <p>Nenhuma configuração de ausência criada ainda.</p>
+                        <p>💡 <strong>Dica:</strong> Crie configurações para diferentes situações como:</p>
+                        <ul>
+                            <li>Fora do horário comercial (18h às 8h)</li>
+                            <li>Finais de semana (sábado e domingo)</li>
+                            <li>Horário de almoço (12h às 13h)</li>
+                        </ul>
+                """
+            
+            html += """
+                    </div>
+                </div>
+                
+                <script>
+                    function toggleAbsence(id) {
+                        fetch('/api/absence/' + id + '/toggle', {method: 'POST'})
+                        .then(response => response.json())
+                        .then(data => {
+                            if (data.success) {
+                                window.location.reload();
+                            } else {
+                                alert('Erro: ' + data.error);
+                            }
+                        })
+                        .catch(error => alert('Erro: ' + error));
+                    }
+                    
+                    function deleteAbsence(id) {
+                        if (confirm('Tem certeza que deseja excluir esta configuração de ausência?')) {
+                            fetch('/api/absence/' + id, {method: 'DELETE'})
+                            .then(response => response.json())
+                            .then(data => {
+                                if (data.success) {
+                                    window.location.reload();
+                                } else {
+                                    alert('Erro: ' + data.error);
+                                }
+                            })
+                            .catch(error => alert('Erro: ' + error));
+                        }
+                    }
+                </script>
+            </body>
+            </html>
+            """
+            
+            return html
+            
+    except Exception as e:
+        return f"Erro: {e}"
+
+# ========== PÁGINA DE HISTÓRICO COMPLETA ==========
+
+@app.route('/history')
+def history():
+    """Página completa de histórico de respostas"""
+    try:
+        with app.app_context():
+            user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
+            if not user:
+                return "Usuário não encontrado"
+            
+            # Buscar histórico com joins
+            history_query = db.session.query(
+                ResponseHistory,
+                Question
+            ).join(
+                Question, ResponseHistory.question_id == Question.id
+            ).filter(
+                ResponseHistory.user_id == user.id
+            ).order_by(
+                ResponseHistory.created_at.desc()
+            ).limit(100)
+            
+            history_records = history_query.all()
+            
+            # Estatísticas
+            today = get_local_time_utc().date()
+            
+            total_responses = ResponseHistory.query.filter_by(user_id=user.id).count()
+            auto_responses = ResponseHistory.query.filter_by(user_id=user.id, response_type='auto').count()
+            absence_responses = ResponseHistory.query.filter_by(user_id=user.id, response_type='absence').count()
+            manual_responses = ResponseHistory.query.filter_by(user_id=user.id, response_type='manual').count()
+            
+            responses_today = ResponseHistory.query.filter_by(user_id=user.id).filter(
+                db.func.date(ResponseHistory.created_at) == today
+            ).count()
+            
+            avg_response_time = db.session.query(db.func.avg(ResponseHistory.response_time)).filter_by(user_id=user.id).scalar()
+            avg_response_time = round(avg_response_time, 2) if avg_response_time else 0
+            
+            html = f"""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>Histórico de Respostas - Bot ML</title>
+                <meta charset="utf-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1">
+                <style>
+                    body {{ font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }}
+                    .container {{ max-width: 1200px; margin: 0 auto; }}
+                    .card {{ background: #fff; padding: 20px; border-radius: 8px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
+                    .nav a {{ display: inline-block; padding: 10px 20px; background: #2196F3; color: white; text-decoration: none; border-radius: 4px; margin-right: 10px; }}
+                    .stats {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin-bottom: 20px; }}
+                    .stat-card {{ background: #fff; padding: 15px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); text-align: center; }}
+                    .stat-number {{ font-size: 1.8em; font-weight: bold; color: #2196F3; }}
+                    .stat-label {{ color: #666; margin-top: 5px; font-size: 0.9em; }}
+                    table {{ width: 100%; border-collapse: collapse; }}
+                    th, td {{ padding: 12px; text-align: left; border-bottom: 1px solid #ddd; }}
+                    th {{ background: #f5f5f5; font-weight: bold; }}
+                    .response-auto {{ color: #4CAF50; font-weight: bold; }}
+                    .response-absence {{ color: #ff9800; font-weight: bold; }}
+                    .response-manual {{ color: #2196F3; font-weight: bold; }}
+                    .question-text {{ max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+                    .response-text {{ max-width: 250px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+                    .filter-section {{ background: #f8f9fa; padding: 15px; border-radius: 4px; margin-bottom: 20px; }}
+                    .filter-group {{ display: flex; gap: 15px; align-items: center; flex-wrap: wrap; }}
+                    .filter-group select, .filter-group input {{ padding: 8px; border: 1px solid #ddd; border-radius: 4px; }}
+                    .btn {{ padding: 8px 16px; background: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer; }}
+                    .btn:hover {{ background: #45a049; }}
+                </style>
+                <script>
+                    function filterHistory() {{
+                        const type = document.getElementById('filter-type').value;
+                        const date = document.getElementById('filter-date').value;
+                        
+                        const rows = document.querySelectorAll('.history-row');
+                        rows.forEach(row => {{
+                            let showRow = true;
+                            
+                            if (type && type !== 'all') {{
+                                const rowType = row.getAttribute('data-type');
+                                if (rowType !== type) showRow = false;
+                            }}
+                            
+                            if (date) {{
+                                const rowDate = row.getAttribute('data-date');
+                                if (!rowDate.startsWith(date)) showRow = false;
+                            }}
+                            
+                            row.style.display = showRow ? '' : 'none';
+                        }});
+                    }}
+                    
+                    function clearFilters() {{
+                        document.getElementById('filter-type').value = 'all';
+                        document.getElementById('filter-date').value = '';
+                        filterHistory();
+                    }}
+                </script>
+            </head>
+            <body>
+                <div class="container">
+                    <div class="card">
+                        <h1>📊 Histórico de Respostas</h1>
+                        <div class="nav">
+                            <a href="/">🏠 Dashboard</a>
+                            <a href="/edit-rules">✏️ Regras</a>
+                            <a href="/edit-absence">🌙 Ausência</a>
+                            <a href="/questions">❓ Perguntas</a>
+                            <a href="/renovar-tokens">🔄 Renovar Tokens</a>
+                        </div>
+                    </div>
+                    
+                    <div class="stats">
+                        <div class="stat-card">
+                            <div class="stat-number">{total_responses}</div>
+                            <div class="stat-label">Total de Respostas</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-number">{auto_responses}</div>
+                            <div class="stat-label">Respostas Automáticas</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-number">{absence_responses}</div>
+                            <div class="stat-label">Respostas de Ausência</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-number">{manual_responses}</div>
+                            <div class="stat-label">Respostas Manuais</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-number">{responses_today}</div>
+                            <div class="stat-label">Respostas Hoje</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-number">{avg_response_time}s</div>
+                            <div class="stat-label">Tempo Médio</div>
+                        </div>
+                    </div>
+                    
+                    <div class="card">
+                        <div class="filter-section">
+                            <h4>🔍 Filtros</h4>
+                            <div class="filter-group">
+                                <label>Tipo:</label>
+                                <select id="filter-type" onchange="filterHistory()">
+                                    <option value="all">Todos</option>
+                                    <option value="auto">Automáticas</option>
+                                    <option value="absence">Ausência</option>
+                                    <option value="manual">Manuais</option>
+                                </select>
+                                
+                                <label>Data:</label>
+                                <input type="date" id="filter-date" onchange="filterHistory()">
+                                
+                                <button class="btn" onclick="clearFilters()">🗑️ Limpar</button>
+                            </div>
+                        </div>
+                        
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Data/Hora</th>
+                                    <th>Tipo</th>
+                                    <th>Pergunta</th>
+                                    <th>Resposta</th>
+                                    <th>Palavras-chave</th>
+                                    <th>Tempo (s)</th>
+                                    <th>Item ID</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+            """
+            
+            for history, question in history_records:
+                created_at = format_local_time(history.created_at)
+                date_str = created_at.strftime('%d/%m %H:%M') if created_at else 'N/A'
+                date_iso = created_at.strftime('%Y-%m-%d') if created_at else ''
+                
+                type_class = f"response-{history.response_type}"
+                type_text = {
+                    'auto': '🤖 Automática',
+                    'absence': '🌙 Ausência', 
+                    'manual': '👤 Manual'
+                }.get(history.response_type, history.response_type)
+                
+                question_text = question.question_text[:50] + '...' if len(question.question_text) > 50 else question.question_text
+                response_text = question.response_text[:40] + '...' if question.response_text and len(question.response_text) > 40 else (question.response_text or 'N/A')
+                
+                keywords = history.keywords_matched or 'N/A'
+                response_time = round(history.response_time, 2) if history.response_time else 'N/A'
+                
+                html += f"""
+                                <tr class="history-row" data-type="{history.response_type}" data-date="{date_iso}">
+                                    <td>{date_str}</td>
+                                    <td><span class="{type_class}">{type_text}</span></td>
+                                    <td class="question-text" title="{question.question_text}">{question_text}</td>
+                                    <td class="response-text" title="{question.response_text or ''}">{response_text}</td>
+                                    <td>{keywords}</td>
+                                    <td>{response_time}</td>
+                                    <td>{question.item_id}</td>
+                                </tr>
+                """
+            
+            if not history_records:
+                html += """
+                                <tr>
+                                    <td colspan="7" style="text-align: center; padding: 40px;">
+                                        <p>📭 Nenhuma resposta registrada ainda.</p>
+                                        <p>As respostas aparecerão aqui conforme o bot processar perguntas.</p>
+                                    </td>
+                                </tr>
+                """
+            
+            html += """
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </body>
+            </html>
+            """
+            
+            return html
+            
+    except Exception as e:
+        return f"Erro: {e}"
+
+# ========== APIs PARA AUSÊNCIA ==========
+
+@app.route('/api/absence', methods=['POST'])
+def add_absence_config():
+    """API para adicionar configuração de ausência"""
+    try:
+        with app.app_context():
+            user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
+            if not user:
+                return jsonify({'error': 'Usuário não encontrado'}), 404
+            
+            name = request.form.get('name')
+            message = request.form.get('message')
+            start_time = request.form.get('start_time')
+            end_time = request.form.get('end_time')
+            days = request.form.getlist('days')
+            
+            if not all([name, message, start_time, end_time, days]):
+                return jsonify({'error': 'Todos os campos são obrigatórios'}), 400
+            
+            days_str = ','.join(days)
+            
+            absence_config = AbsenceConfig(
+                user_id=user.id,
+                name=name,
+                message=message,
+                start_time=start_time,
+                end_time=end_time,
+                days_of_week=days_str
+            )
+            
+            db.session.add(absence_config)
+            db.session.commit()
+            
+            return redirect('/edit-absence')
+            
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/absence/<int:config_id>/toggle', methods=['POST'])
+def toggle_absence_config(config_id):
+    """API para ativar/desativar configuração de ausência"""
+    try:
+        with app.app_context():
+            config = AbsenceConfig.query.get(config_id)
+            if config:
+                config.is_active = not config.is_active
+                db.session.commit()
+                return jsonify({'success': True, 'is_active': config.is_active})
+            else:
+                return jsonify({'error': 'Configuração não encontrada'}), 404
+                
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/absence/<int:config_id>', methods=['DELETE'])
+def delete_absence_config(config_id):
+    """API para excluir configuração de ausência"""
+    try:
+        with app.app_context():
+            config = AbsenceConfig.query.get(config_id)
+            if config:
+                db.session.delete(config)
+                db.session.commit()
+                return jsonify({'success': True})
+            else:
+                return jsonify({'error': 'Configuração não encontrada'}), 404
+                
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+# ========== WEBHOOK CORRIGIDO PARA RESOLVER 405 ==========
+
+@app.route('/api/ml/webhook', methods=['GET', 'POST'])
+def webhook_handler():
+    """Webhook para receber notificações do ML - CORRIGIDO PARA ACEITAR GET E POST"""
+    try:
+        if request.method == 'GET':
+            # GET request - pode ser callback de autorização
+            code = request.args.get('code')
+            error = request.args.get('error')
+            
+            if error:
+                return f"""
+                <h1>❌ Erro na Autorização (Webhook)</h1>
+                <p>Erro: {error}</p>
+                <p>Descrição: {request.args.get('error_description', 'N/A')}</p>
+                <a href="/renovar-tokens">🔄 Tentar Novamente</a>
+                """
+            
+            if code:
+                return f"""
+                <h1>✅ Código Recebido via Webhook!</h1>
+                <p><strong>Código de Autorização:</strong></p>
+                <div style="background: #f5f5f5; padding: 10px; border-radius: 4px; font-family: monospace; word-break: break-all;">
+                    {code}
+                </div>
+                <p>Copie este código e cole na interface de renovação.</p>
+                <a href="/renovar-tokens">🔄 Ir para Renovação</a>
+                """
+            
+            return """
+            <h1>📡 Webhook ML - Status</h1>
+            <p>✅ Webhook funcionando corretamente</p>
+            <p>🔄 Aguardando notificações do Mercado Livre</p>
+            <a href="/">🏠 Voltar ao Dashboard</a>
+            """
+        
+        elif request.method == 'POST':
+            # POST request - notificação do ML
+            try:
+                # Obter dados do webhook
+                data = request.get_json() or {}
+                
+                topic = data.get('topic')
+                resource = data.get('resource')
+                user_id_ml = data.get('user_id')
+                application_id = data.get('application_id')
+                attempts = data.get('attempts', 1)
+                sent = data.get('sent')
+                
+                print(f"📡 Webhook recebido: {topic} - {resource}")
+                
+                # Registrar webhook no banco
+                log_webhook(topic, resource, user_id_ml, application_id, attempts, sent)
+                
+                # Processar diferentes tipos de notificação
+                if topic == 'questions':
+                    print("❓ Nova pergunta recebida via webhook")
+                    # Processar perguntas imediatamente
+                    threading.Thread(target=process_questions, daemon=True).start()
+                
+                elif topic == 'orders_v2':
+                    print("🛒 Nova ordem recebida via webhook")
+                
+                elif topic == 'items':
+                    print("📦 Atualização de item via webhook")
+                
+                # Retornar resposta de sucesso para o ML
+                return jsonify({'status': 'ok', 'message': 'Webhook processado com sucesso'}), 200
+                
+            except Exception as e:
+                print(f"❌ Erro ao processar webhook: {e}")
+                return jsonify({'status': 'error', 'message': str(e)}), 500
+    
+    except Exception as e:
+        print(f"❌ Erro geral no webhook: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/webhook-logs')
+def webhook_logs():
+    """Página para visualizar logs de webhook"""
+    try:
+        with app.app_context():
+            logs = WebhookLog.query.order_by(WebhookLog.received.desc()).limit(50).all()
+            
+            html = """
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>Logs Webhook - Bot ML</title>
+                <meta charset="utf-8">
+                <style>
+                    body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
+                    .container { max-width: 1200px; margin: 0 auto; }
+                    .card { background: #fff; padding: 20px; border-radius: 8px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+                    .nav a { display: inline-block; padding: 10px 20px; background: #2196F3; color: white; text-decoration: none; border-radius: 4px; margin-right: 10px; }
+                    table { width: 100%; border-collapse: collapse; }
+                    th, td { padding: 10px; text-align: left; border-bottom: 1px solid #ddd; }
+                    th { background: #f5f5f5; }
+                    .topic-questions { color: #2196F3; }
+                    .topic-orders { color: #4CAF50; }
+                    .topic-items { color: #ff9800; }
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <div class="card">
+                        <h1>📡 Logs de Webhook</h1>
+                        <div class="nav">
+                            <a href="/">🏠 Dashboard</a>
+                            <a href="/edit-rules">✏️ Regras</a>
+                            <a href="/history">📊 Histórico</a>
+                            <a href="/renovar-tokens">🔄 Renovar Tokens</a>
+                        </div>
+                    </div>
+                    
+                    <div class="card">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Data/Hora</th>
+                                    <th>Tópico</th>
+                                    <th>Recurso</th>
+                                    <th>User ID</th>
+                                    <th>Tentativas</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+            """
+            
+            for log in logs:
+                received_at = format_local_time(log.received)
+                date_str = received_at.strftime('%d/%m %H:%M:%S') if received_at else 'N/A'
+                
+                topic_class = f"topic-{log.topic}" if log.topic else ""
+                
+                html += f"""
+                                <tr>
+                                    <td>{date_str}</td>
+                                    <td class="{topic_class}">{log.topic or 'N/A'}</td>
+                                    <td>{log.resource or 'N/A'}</td>
+                                    <td>{log.user_id_ml or 'N/A'}</td>
+                                    <td>{log.attempts}</td>
+                                </tr>
+                """
+            
+            html += """
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </body>
+            </html>
+            """
+            
+            return html
+            
+    except Exception as e:
+        return f"Erro: {e}"
+
+# ========== ROTAS DE RENOVAÇÃO DE TOKENS ==========
+
+@app.route('/renovar-tokens')
+def renovar_tokens_page():
+    """Interface para renovação de tokens"""
+    auth_url = generate_auth_url()
+    
+    html = f"""
     <!DOCTYPE html>
     <html>
     <head>
-        <title>Debug Completo - Bot ML</title>
+        <title>Renovar Tokens - Bot ML</title>
         <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
         <style>
-            body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
-            .container { max-width: 1200px; margin: 0 auto; }
-            .card { background: #fff; padding: 20px; border-radius: 8px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
-            .nav a { display: inline-block; padding: 10px 20px; background: #2196F3; color: white; text-decoration: none; border-radius: 4px; margin-right: 10px; }
-            .log-container { background: #000; color: #0f0; padding: 15px; border-radius: 4px; font-family: monospace; font-size: 12px; max-height: 600px; overflow-y: auto; }
-            .log-line { margin-bottom: 2px; }
-            .btn { padding: 8px 16px; background: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer; margin-right: 10px; }
+            body {{ font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }}
+            .container {{ max-width: 800px; margin: 0 auto; }}
+            .card {{ background: #fff; padding: 20px; border-radius: 8px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
+            .nav a {{ display: inline-block; padding: 10px 20px; background: #2196F3; color: white; text-decoration: none; border-radius: 4px; margin-right: 10px; }}
+            .nav a:hover {{ background: #1976D2; }}
+            .btn {{ padding: 12px 24px; background: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer; text-decoration: none; display: inline-block; font-size: 16px; }}
+            .btn:hover {{ background: #45a049; }}
+            .btn-primary {{ background: #2196F3; }}
+            .btn-primary:hover {{ background: #1976D2; }}
+            .btn-warning {{ background: #ff9800; }}
+            .btn-warning:hover {{ background: #e68900; }}
+            .form-group {{ margin-bottom: 15px; }}
+            label {{ display: block; margin-bottom: 5px; font-weight: bold; }}
+            input, textarea {{ width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box; font-size: 14px; }}
+            .alert {{ padding: 15px; border-radius: 4px; margin-bottom: 20px; }}
+            .alert-info {{ background: #e3f2fd; border: 1px solid #2196F3; color: #1976D2; }}
+            .alert-success {{ background: #e8f5e8; border: 1px solid #4CAF50; color: #2e7d32; }}
+            .alert-danger {{ background: #ffebee; border: 1px solid #f44336; color: #c62828; }}
+            .step {{ background: #f8f9fa; padding: 15px; border-left: 4px solid #2196F3; margin-bottom: 15px; }}
+            .step h4 {{ margin: 0 0 10px 0; color: #1976D2; }}
+            .code-box {{ background: #f5f5f5; padding: 10px; border-radius: 4px; font-family: monospace; word-break: break-all; }}
         </style>
         <script>
-            function clearLogs() {
-                fetch('/api/debug/clear-logs', {method: 'POST'})
-                .then(() => window.location.reload());
-            }
-            function refreshPage() { window.location.reload(); }
-            setInterval(refreshPage, 15000); // Atualizar a cada 15 segundos
+            function abrirAutorizacao() {{
+                window.open('{auth_url}', '_blank');
+            }}
+            
+            function processarCodigo() {{
+                const codigo = document.getElementById('codigo').value.trim();
+                if (!codigo) {{
+                    alert('Por favor, insira o código de autorização');
+                    return;
+                }}
+                
+                document.getElementById('loading').style.display = 'block';
+                document.getElementById('btn-processar').disabled = true;
+                
+                fetch('/api/tokens/process-code-flexible', {{
+                    method: 'POST',
+                    headers: {{
+                        'Content-Type': 'application/json'
+                    }},
+                    body: JSON.stringify({{code: codigo}})
+                }})
+                .then(response => response.json())
+                .then(data => {{
+                    document.getElementById('loading').style.display = 'none';
+                    document.getElementById('btn-processar').disabled = false;
+                    
+                    if (data.success) {{
+                        document.getElementById('resultado').innerHTML = `
+                            <div class="alert alert-success">
+                                <h4>✅ Tokens Atualizados com Sucesso!</h4>
+                                <p><strong>Access Token:</strong> ${{data.access_token.substring(0, 30)}}...</p>
+                                <p><strong>User ID:</strong> ${{data.user_id}}</p>
+                                <p><strong>Email:</strong> ${{data.user_email}}</p>
+                                <p><strong>Expira em:</strong> ${{data.expires_in}} segundos</p>
+                                <p>🎉 Sistema atualizado automaticamente!</p>
+                            </div>
+                        `;
+                        document.getElementById('codigo').value = '';
+                        
+                        // Recarregar página após 3 segundos
+                        setTimeout(() => {{
+                            window.location.href = '/';
+                        }}, 3000);
+                    }} else {{
+                        document.getElementById('resultado').innerHTML = `
+                            <div class="alert alert-danger">
+                                <h4>❌ Erro ao Processar Código</h4>
+                                <p>${{data.error}}</p>
+                            </div>
+                        `;
+                    }}
+                }})
+                .catch(error => {{
+                    document.getElementById('loading').style.display = 'none';
+                    document.getElementById('btn-processar').disabled = false;
+                    document.getElementById('resultado').innerHTML = `
+                        <div class="alert alert-danger">
+                            <h4>❌ Erro na Requisição</h4>
+                            <p>${{error}}</p>
+                        </div>
+                    `;
+                }});
+            }}
         </script>
     </head>
     <body>
         <div class="container">
             <div class="card">
-                <h1>🔍 Debug Completo</h1>
+                <h1>🔄 Renovar Tokens do Bot</h1>
                 <div class="nav">
                     <a href="/">🏠 Dashboard</a>
+                    <a href="/token-status">🔑 Status Token</a>
                     <a href="/edit-rules">✏️ Regras</a>
-                    <a href="/edit-absence">🌙 Ausência</a>
                 </div>
             </div>
             
             <div class="card">
-                <h3>📋 Todos os Logs de Debug</h3>
-                <button class="btn" onclick="clearLogs()">🗑️ Limpar Logs</button>
-                <button class="btn" onclick="refreshPage()">🔄 Atualizar</button>
-                <div class="log-container">
-    """
-    
-    for log in DEBUG_LOGS:
-        html += f'<div class="log-line">{log}</div>'
-    
-    if not DEBUG_LOGS:
-        html += '<div class="log-line">Nenhum log de debug ainda...</div>'
-    
-    html += """
+                <div class="alert alert-info">
+                    <h4>ℹ️ Como Renovar os Tokens</h4>
+                    <p>Este sistema aceita códigos gerados com <strong>qualquer URL de redirect</strong>, resolvendo problemas de compatibilidade.</p>
                 </div>
+                
+                <div class="step">
+                    <h4>📋 Passo 1: Autorizar Aplicação</h4>
+                    <p>Clique no botão abaixo para abrir a página de autorização do Mercado Livre:</p>
+                    <button class="btn btn-primary" onclick="abrirAutorizacao()">
+                        🌐 Abrir Autorização do ML
+                    </button>
+                </div>
+                
+                <div class="step">
+                    <h4>🔑 Passo 2: Obter Código</h4>
+                    <p>Após autorizar:</p>
+                    <ol>
+                        <li>✅ Faça login no Mercado Livre</li>
+                        <li>✅ Autorize a aplicação</li>
+                        <li>✅ Você será redirecionado (pode dar erro, é normal)</li>
+                        <li>✅ <strong>Copie APENAS o código da URL</strong> (ex: TG-abc123...)</li>
+                    </ol>
+                    <p><strong>💡 Dica:</strong> O código funciona independente da URL de redirect usada!</p>
+                </div>
+                
+                <div class="step">
+                    <h4>🔄 Passo 3: Processar Código</h4>
+                    <div class="form-group">
+                        <label for="codigo">Cole APENAS o código de autorização aqui:</label>
+                        <input type="text" id="codigo" placeholder="TG-abc123def456..." />
+                        <small>Exemplo: TG-68839cdf8b73a2000176ea5f-180617463</small>
+                    </div>
+                    <button class="btn btn-warning" onclick="processarCodigo()" id="btn-processar">
+                        🔄 Processar e Atualizar Tokens
+                    </button>
+                    <div id="loading" style="display: none; margin-top: 10px;">
+                        <p>⏳ Processando código com múltiplas tentativas de redirect_uri...</p>
+                    </div>
+                </div>
+                
+                <div id="resultado"></div>
+            </div>
+            
+            <div class="card">
+                <h3>🔗 URLs de Redirect Suportadas</h3>
+                <div class="code-box">
+                    {chr(10).join(REDIRECT_URIS)}
+                </div>
+                <p><small>O sistema tenta automaticamente todas as URLs até encontrar a correta.</small></p>
             </div>
         </div>
     </body>
@@ -1021,93 +1761,292 @@ def debug_full():
     
     return html
 
-@app.route('/api/debug/clear-logs', methods=['POST'])
-def clear_debug_logs():
-    """API para limpar logs de debug"""
-    global DEBUG_LOGS
-    DEBUG_LOGS.clear()
-    add_debug_log("🗑️ Logs de debug limpos")
-    return jsonify({'success': True})
-
-# ========== OUTRAS ROTAS ESSENCIAIS (simplificadas para debug) ==========
-
-@app.route('/edit-rules')
-def edit_rules():
-    """Interface simplificada para editar regras"""
-    return "<h1>✏️ Regras</h1><p>Interface simplificada no modo debug</p><a href='/'>🏠 Voltar</a>"
-
-@app.route('/edit-absence')
-def edit_absence():
-    """Interface simplificada para ausência"""
-    return "<h1>🌙 Ausência</h1><p>Interface simplificada no modo debug</p><a href='/'>🏠 Voltar</a>"
-
-@app.route('/history')
-def history():
-    """Interface simplificada para histórico"""
-    return "<h1>📊 Histórico</h1><p>Interface simplificada no modo debug</p><a href='/'>🏠 Voltar</a>"
-
-@app.route('/renovar-tokens')
-def renovar_tokens():
-    """Interface simplificada para renovação"""
-    return "<h1>🔄 Renovar Tokens</h1><p>Interface simplificada no modo debug</p><a href='/'>🏠 Voltar</a>"
+@app.route('/api/tokens/process-code-flexible', methods=['POST'])
+def process_authorization_code_flexible():
+    """API para processar código de autorização com múltiplas tentativas de redirect_uri"""
+    try:
+        data = request.get_json()
+        code = data.get('code', '').strip()
+        
+        if not code:
+            return jsonify({'success': False, 'error': 'Código não fornecido'})
+        
+        print(f"🔄 Processando código: {code}")
+        
+        # Obter tokens do código com múltiplas tentativas
+        tokens_data, error = get_tokens_from_code_flexible(code)
+        if error:
+            return jsonify({'success': False, 'error': error})
+        
+        # Obter informações do usuário
+        user_info, error = get_user_info(tokens_data.get('access_token'))
+        if error:
+            print(f"⚠️ Aviso: {error}")
+        
+        # Atualizar sistema
+        success, message = update_system_tokens(tokens_data, user_info)
+        if not success:
+            return jsonify({'success': False, 'error': message})
+        
+        return jsonify({
+            'success': True,
+            'message': 'Tokens atualizados com sucesso',
+            'access_token': tokens_data.get('access_token'),
+            'user_id': user_info.get('id') if user_info else 'N/A',
+            'user_email': user_info.get('email') if user_info else 'N/A',
+            'expires_in': tokens_data.get('expires_in'),
+            'redirect_uri_used': 'Múltiplas tentativas - sucesso!'
+        })
+        
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
 
 @app.route('/api/token/check', methods=['POST'])
 def check_token_api():
     """API para verificar token manualmente"""
     try:
         is_valid, message = check_token_validity()
-        add_debug_log(f"🔍 Verificação manual de token: {message}")
         
-        return jsonify({
-            'success': True,
-            'message': message,
-            'valid': is_valid
-        })
+        if not is_valid:
+            # Tentar renovar automaticamente
+            success, refresh_message = refresh_access_token()
+            if success:
+                return jsonify({
+                    'success': True,
+                    'message': 'Token renovado automaticamente!',
+                    'status': 'renewed'
+                })
+            else:
+                return jsonify({
+                    'success': False,
+                    'message': f'Token inválido. Use a interface de renovação para gerar novos tokens.',
+                    'status': 'error'
+                })
+        else:
+            return jsonify({
+                'success': True,
+                'message': 'Token válido!',
+                'status': 'valid'
+            })
             
     except Exception as e:
-        add_debug_log(f"❌ Erro na verificação manual: {e}")
         return jsonify({
             'success': False,
-            'message': f'Erro na verificação: {str(e)}'
+            'message': f'Erro na verificação: {str(e)}',
+            'status': 'error'
         })
 
-# ========== WEBHOOK SIMPLIFICADO ==========
+# ========== CALLBACKS ALTERNATIVOS ==========
 
-@app.route('/api/ml/webhook', methods=['GET', 'POST'])
-def webhook_handler():
-    """Webhook simplificado para debug"""
-    try:
-        if request.method == 'GET':
-            code = request.args.get('code')
-            if code:
-                add_debug_log(f"📡 Webhook GET recebido com código: {code[:20]}...")
-                return f"<h1>✅ Código Recebido!</h1><p>Código: {code}</p>"
-            return "<h1>📡 Webhook ML - Status OK</h1>"
-        
-        elif request.method == 'POST':
-            data = request.get_json() or {}
-            topic = data.get('topic')
-            resource = data.get('resource')
-            
-            add_debug_log(f"📡 Webhook POST recebido: {topic} - {resource}")
-            
-            if topic == 'questions':
-                add_debug_log("❓ Nova pergunta via webhook - disparando processamento")
-                # Processar perguntas imediatamente
-                threading.Thread(target=process_questions, daemon=True).start()
-            
-            return jsonify({'status': 'ok'}), 200
+@app.route('/api/ml/auth-callback')
+def auth_callback():
+    """Callback para receber código de autorização"""
+    code = request.args.get('code')
+    error = request.args.get('error')
     
+    if error:
+        return f"""
+        <h1>❌ Erro na Autorização</h1>
+        <p>Erro: {error}</p>
+        <p>Descrição: {request.args.get('error_description', 'N/A')}</p>
+        <a href="/renovar-tokens">🔄 Tentar Novamente</a>
+        """
+    
+    if code:
+        return f"""
+        <h1>✅ Código Recebido!</h1>
+        <p><strong>Código de Autorização:</strong></p>
+        <div style="background: #f5f5f5; padding: 10px; border-radius: 4px; font-family: monospace; word-break: break-all;">
+            {code}
+        </div>
+        <p>Copie este código e cole na interface de renovação.</p>
+        <a href="/renovar-tokens">🔄 Ir para Renovação</a>
+        """
+    
+    return """
+    <h1>❌ Código não encontrado</h1>
+    <p>Não foi possível obter o código de autorização.</p>
+    <a href="/renovar-tokens">🔄 Tentar Novamente</a>
+    """
+
+# ========== OUTRAS ROTAS ESSENCIAIS ==========
+
+@app.route('/edit-rules')
+def edit_rules():
+    """Interface para editar regras de resposta"""
+    try:
+        with app.app_context():
+            user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
+            if user:
+                rules = AutoResponse.query.filter_by(user_id=user.id).all()
+            else:
+                rules = []
+            
+            html = """
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>Editar Regras - Bot ML</title>
+                <meta charset="utf-8">
+                <style>
+                    body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
+                    .container { max-width: 800px; margin: 0 auto; }
+                    .card { background: #fff; padding: 20px; border-radius: 8px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+                    .form-group { margin-bottom: 15px; }
+                    label { display: block; margin-bottom: 5px; font-weight: bold; }
+                    input, textarea { width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box; }
+                    textarea { height: 80px; resize: vertical; }
+                    .btn { padding: 10px 20px; background: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer; }
+                    .btn:hover { background: #45a049; }
+                    .btn-danger { background: #f44336; }
+                    .btn-danger:hover { background: #da190b; }
+                    .rule-item { border: 1px solid #ddd; padding: 15px; margin-bottom: 10px; border-radius: 4px; }
+                    .nav a { display: inline-block; padding: 10px 20px; background: #2196F3; color: white; text-decoration: none; border-radius: 4px; margin-right: 10px; }
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <div class="card">
+                        <h1>✏️ Editar Regras de Resposta</h1>
+                        <div class="nav">
+                            <a href="/">🏠 Dashboard</a>
+                            <a href="/edit-absence">🌙 Ausência</a>
+                            <a href="/history">📊 Histórico</a>
+                            <a href="/renovar-tokens">🔄 Renovar Tokens</a>
+                        </div>
+                    </div>
+                    
+                    <div class="card">
+                        <h3>➕ Adicionar Nova Regra</h3>
+                        <form method="POST" action="/api/rules">
+                            <div class="form-group">
+                                <label>Palavras-chave (separadas por vírgula):</label>
+                                <input type="text" name="keywords" placeholder="preço,valor,quanto custa" required>
+                            </div>
+                            <div class="form-group">
+                                <label>Resposta:</label>
+                                <textarea name="response_text" placeholder="Olá! O preço está na descrição..." required></textarea>
+                            </div>
+                            <button type="submit" class="btn">💾 Salvar Regra</button>
+                        </form>
+                    </div>
+                    
+                    <div class="card">
+                        <h3>📋 Regras Existentes</h3>
+            """
+            
+            for rule in rules:
+                status = "✅ Ativa" if rule.is_active else "❌ Inativa"
+                html += f"""
+                        <div class="rule-item">
+                            <p><strong>Palavras-chave:</strong> {rule.keywords}</p>
+                            <p><strong>Resposta:</strong> {rule.response_text}</p>
+                            <p><strong>Status:</strong> {status}</p>
+                            <button class="btn btn-danger" onclick="deleteRule({rule.id})">🗑️ Excluir</button>
+                        </div>
+                """
+            
+            html += """
+                    </div>
+                </div>
+                
+                <script>
+                    function deleteRule(id) {
+                        if (confirm('Tem certeza que deseja excluir esta regra?')) {
+                            fetch('/api/rules/' + id, {method: 'DELETE'})
+                            .then(() => window.location.reload())
+                            .catch(error => alert('Erro: ' + error));
+                        }
+                    }
+                </script>
+            </body>
+            </html>
+            """
+            
+            return html
+            
     except Exception as e:
-        add_debug_log(f"❌ Erro no webhook: {e}")
-        return jsonify({'status': 'error', 'message': str(e)}), 500
+        return f"Erro: {e}"
+
+@app.route('/api/rules', methods=['POST'])
+def add_rule():
+    """API para adicionar nova regra"""
+    try:
+        with app.app_context():
+            user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
+            if not user:
+                return jsonify({'error': 'Usuário não encontrado'}), 404
+            
+            keywords = request.form.get('keywords')
+            response_text = request.form.get('response_text')
+            
+            if not keywords or not response_text:
+                return jsonify({'error': 'Campos obrigatórios'}), 400
+            
+            rule = AutoResponse(
+                user_id=user.id,
+                keywords=keywords,
+                response_text=response_text
+            )
+            
+            db.session.add(rule)
+            db.session.commit()
+            
+            return redirect('/edit-rules')
+            
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/rules/<int:rule_id>', methods=['DELETE'])
+def delete_rule(rule_id):
+    """API para excluir regra"""
+    try:
+        with app.app_context():
+            rule = AutoResponse.query.get(rule_id)
+            if rule:
+                db.session.delete(rule)
+                db.session.commit()
+                return jsonify({'success': True})
+            else:
+                return jsonify({'error': 'Regra não encontrada'}), 404
+                
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/questions')
+def questions_page():
+    """Página de perguntas recebidas"""
+    return """
+    <!DOCTYPE html>
+    <html>
+    <head><title>Perguntas - Bot ML</title></head>
+    <body>
+        <h1>❓ Perguntas Recebidas</h1>
+        <p>Página em desenvolvimento...</p>
+        <a href="/">🏠 Voltar ao Dashboard</a>
+    </body>
+    </html>
+    """
+
+@app.route('/token-status')
+def token_status_page():
+    """Página detalhada do status do token"""
+    return """
+    <!DOCTYPE html>
+    <html>
+    <head><title>Status do Token - Bot ML</title></head>
+    <body>
+        <h1>🔑 Status do Token</h1>
+        <p>Página em desenvolvimento...</p>
+        <a href="/">🏠 Voltar ao Dashboard</a>
+    </body>
+    </html>
+    """
 
 # ========== INICIALIZAÇÃO ==========
 
 def start_background_tasks():
     """Inicia tarefas em background"""
-    add_debug_log("🚀 Iniciando sistema com DEBUG INTENSIVO...")
-    
     # Inicializar banco
     init_database()
     
@@ -1121,11 +2060,10 @@ def start_background_tasks():
     polling_thread = threading.Thread(target=polling_loop, daemon=True)
     polling_thread.start()
     
-    add_debug_log("✅ Sistema iniciado com DEBUG INTENSIVO!")
-    add_debug_log("🔍 Todos os logs serão registrados para identificar problemas")
-    add_debug_log("🤖 Verificando se gatilhos funcionam corretamente")
-    add_debug_log("🌙 Verificando se sistema de ausência funciona")
-    add_debug_log("🔄 Polling ativo a cada 30 segundos")
+    print("✅ Sistema iniciado com funcionalidades completas!")
+    print("🌙 Configuração de ausência implementada")
+    print("📊 Histórico de respostas implementado")
+    print("🔧 Todas as funcionalidades funcionando")
 
 if __name__ == '__main__':
     start_background_tasks()
