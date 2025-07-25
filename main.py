@@ -1,54 +1,83 @@
-
-import os
-import requests
 import json
+import os
 import time
+import requests
 from datetime import datetime, timedelta
-from flask import Flask, request
+from flask import Flask
+
+CLIENT_ID = "SUA_CLIENT_ID"
+CLIENT_SECRET = "SUA_CLIENT_SECRET"
+TOKEN_URL = "https://api.mercadolibre.com/oauth/token"
+TOKENS_FILE = "tokens.json"
 
 app = Flask(__name__)
 
-# Variáveis de ambiente (ou substitua diretamente pelas strings, se preferir)
-ML_CLIENT_ID = os.getenv("ML_CLIENT_ID", "5510376630479325")
-ML_CLIENT_SECRET = os.getenv("ML_CLIENT_SECRET", "jlR4As2x8uFY3RTpysLpuPhzC9yM9d35")
-ML_REDIRECT_URI = os.getenv("ML_REDIRECT_URI", "https://bot-mercadolivre-dettech-v2.onrender.com/callback")
+def load_tokens():
+    if os.path.exists(TOKENS_FILE):
+        with open(TOKENS_FILE, "r") as f:
+            data = json.load(f)
+            return data
+    return {}
 
-# Simulação de banco de dados em memória
-db = {"access_token": None, "refresh_token": None, "token_expires_at": None}
+def save_tokens(data):
+    with open(TOKENS_FILE, "w") as f:
+        json.dump(data, f)
 
-@app.route('/')
-def index():
-    return '<a href="/auth">Autenticar com Mercado Livre</a>'
+def refresh_access_token(refresh_token):
+    print("🔁 Renovando access token...")
+    response = requests.post(TOKEN_URL, data={
+        "grant_type": "refresh_token",
+        "client_id": CLIENT_ID,
+        "client_secret": CLIENT_SECRET,
+        "refresh_token": refresh_token
+    })
 
-@app.route('/auth')
-def auth():
-    auth_url = "https://auth.mercadolivre.com.br/authorization?response_type=code&client_id={}&redirect_uri={}".format(ML_CLIENT_ID, ML_REDIRECT_URI)
-    return '<a href="{}">Clique aqui para autorizar o aplicativo</a>'.format(auth_url)
-
-@app.route('/callback')
-def callback():
-    code = request.args.get('code')
-    if not code:
-        return 'Erro: código de autorização não encontrado.', 400
-
-    token_url = 'https://api.mercadolibre.com/oauth/token'
-    payload = {
-        'grant_type': 'authorization_code',
-        'client_id': ML_CLIENT_ID,
-        'client_secret': ML_CLIENT_SECRET,
-        'code': code,
-        'redirect_uri': ML_REDIRECT_URI
-    }
-
-    response = requests.post(token_url, data=payload)
     if response.status_code == 200:
-        data = response.json()
-        db["access_token"] = data['access_token']
-        db["refresh_token"] = data['refresh_token']
-        db["token_expires_at"] = datetime.utcnow() + timedelta(seconds=data['expires_in'])
-        return "<h2>✅ Autenticado com sucesso!</h2><p><strong>Access Token:</strong><br>{}</p><p><strong>Refresh Token:</strong><br>{}</p><p>Copie esses tokens e adicione no seu script principal para ativar o bot.</p>".format(data['access_token'], data['refresh_token'])
+        tokens = response.json()
+        expires_in = tokens.get("expires_in", 21600)
+        tokens["token_expires_at"] = (datetime.utcnow() + timedelta(seconds=expires_in)).isoformat()
+        save_tokens(tokens)
+        print("✅ Access token renovado com sucesso!")
+        return tokens["access_token"]
     else:
-        return "❌ Erro ao obter tokens: {}".format(response.text), 400
+        print("❌ Falha ao renovar token:", response.text)
+        return None
 
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+def get_valid_access_token():
+    tokens = load_tokens()
+    access_token = tokens.get("access_token")
+    refresh_token = tokens.get("refresh_token")
+    expires_at_str = tokens.get("token_expires_at")
+
+    if access_token and refresh_token and expires_at_str:
+        expires_at = datetime.fromisoformat(expires_at_str)
+        if datetime.utcnow() < expires_at:
+            return access_token
+        else:
+            return refresh_access_token(refresh_token)
+    return None
+
+def monitorar_perguntas():
+    while True:
+        access_token = get_valid_access_token()
+        if not access_token:
+            print("❌ Sem access token válido.")
+            break
+
+        headers = {"Authorization": f"Bearer {access_token}"}
+        response = requests.get("https://api.mercadolibre.com/messages/questions/search?tag=unanswered", headers=headers)
+
+        if response.status_code == 200:
+            print("📩 Perguntas buscadas com sucesso.")
+        else:
+            print("⚠️ Erro ao buscar perguntas:", response.text)
+
+        time.sleep(60)
+
+@app.route("/")
+def home():
+    return "✅ Bot está rodando!"
+
+if __name__ == "__main__":
+    print("🚀 Iniciando bot...")
+    monitorar_perguntas()
