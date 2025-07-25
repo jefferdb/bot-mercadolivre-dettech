@@ -69,9 +69,16 @@ class AbsenceConfig(db.Model):
     is_active = db.Column(db.Boolean, default=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
+# Variável global para controlar inicialização
+_initialized = False
+
 # Função para criar tabelas e dados iniciais
-def create_tables_and_data():
-    with app.app_context():
+def initialize_database():
+    global _initialized
+    if _initialized:
+        return
+    
+    try:
         db.create_all()
         
         # Criar usuário padrão
@@ -175,6 +182,12 @@ def create_tables_and_data():
             
             db.session.commit()
             print(f"✅ {len(absence_configs)} configurações de ausência criadas!")
+        
+        _initialized = True
+        print("✅ Banco de dados inicializado com sucesso!")
+        
+    except Exception as e:
+        print(f"❌ Erro ao inicializar banco: {e}")
 
 # Função para verificar se está em horário de ausência
 def is_absence_time():
@@ -265,56 +278,61 @@ def fetch_unanswered_questions():
 
 # Função para processar perguntas automaticamente
 def process_questions():
-    questions = fetch_unanswered_questions()
-    
-    if not questions:
-        return
-    
-    user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
-    if not user:
-        return
-    
-    for q in questions:
-        question_id = str(q.get("id"))
-        question_text = q.get("text", "")
-        item_id = q.get("item_id", "")
+    try:
+        initialize_database()  # Garantir que banco está inicializado
         
-        # Verificar se já processamos esta pergunta
-        existing = Question.query.filter_by(ml_question_id=question_id).first()
-        if existing:
-            continue
+        questions = fetch_unanswered_questions()
         
-        # Salvar pergunta no banco
-        question = Question(
-            ml_question_id=question_id,
-            user_id=user.id,
-            item_id=item_id,
-            question_text=question_text,
-            is_answered=False
-        )
-        db.session.add(question)
+        if not questions:
+            return
         
-        # Verificar se está em horário de ausência
-        absence_message = is_absence_time()
-        if absence_message:
-            if answer_question_ml(question_id, absence_message):
-                question.response_text = absence_message
-                question.is_answered = True
-                question.answered_automatically = True
-                question.answered_at = datetime.utcnow()
-                print(f"✅ Pergunta {question_id} respondida com mensagem de ausência")
-        else:
-            # Buscar resposta automática
-            auto_response = find_auto_response(question_text)
-            if auto_response:
-                if answer_question_ml(question_id, auto_response):
-                    question.response_text = auto_response
+        user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
+        if not user:
+            return
+        
+        for q in questions:
+            question_id = str(q.get("id"))
+            question_text = q.get("text", "")
+            item_id = q.get("item_id", "")
+            
+            # Verificar se já processamos esta pergunta
+            existing = Question.query.filter_by(ml_question_id=question_id).first()
+            if existing:
+                continue
+            
+            # Salvar pergunta no banco
+            question = Question(
+                ml_question_id=question_id,
+                user_id=user.id,
+                item_id=item_id,
+                question_text=question_text,
+                is_answered=False
+            )
+            db.session.add(question)
+            
+            # Verificar se está em horário de ausência
+            absence_message = is_absence_time()
+            if absence_message:
+                if answer_question_ml(question_id, absence_message):
+                    question.response_text = absence_message
                     question.is_answered = True
                     question.answered_automatically = True
                     question.answered_at = datetime.utcnow()
-                    print(f"✅ Pergunta {question_id} respondida automaticamente")
-        
-        db.session.commit()
+                    print(f"✅ Pergunta {question_id} respondida com mensagem de ausência")
+            else:
+                # Buscar resposta automática
+                auto_response = find_auto_response(question_text)
+                if auto_response:
+                    if answer_question_ml(question_id, auto_response):
+                        question.response_text = auto_response
+                        question.is_answered = True
+                        question.answered_automatically = True
+                        question.answered_at = datetime.utcnow()
+                        print(f"✅ Pergunta {question_id} respondida automaticamente")
+            
+            db.session.commit()
+    except Exception as e:
+        print(f"❌ Erro ao processar perguntas: {e}")
 
 # Função de monitoramento contínuo
 def monitor_questions():
@@ -329,6 +347,8 @@ def monitor_questions():
 # Rotas da aplicação
 @app.route('/')
 def dashboard():
+    initialize_database()  # Garantir que banco está inicializado
+    
     user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
     if not user:
         return "❌ Usuário não encontrado", 404
@@ -444,6 +464,8 @@ def dashboard():
 
 @app.route('/rules')
 def rules_page():
+    initialize_database()
+    
     user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
     if not user:
         return "❌ Usuário não encontrado", 404
@@ -504,6 +526,8 @@ def rules_page():
 
 @app.route('/questions')
 def questions_page():
+    initialize_database()
+    
     user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
     if not user:
         return "❌ Usuário não encontrado", 404
@@ -566,6 +590,8 @@ def questions_page():
 
 @app.route('/absence')
 def absence_page():
+    initialize_database()
+    
     user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
     if not user:
         return "❌ Usuário não encontrado", 404
@@ -658,6 +684,8 @@ def webhook_ml():
 # APIs para dados
 @app.route('/api/ml/rules')
 def api_rules():
+    initialize_database()
+    
     user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
     if not user:
         return jsonify({"error": "Usuário não encontrado"}), 404
@@ -673,6 +701,8 @@ def api_rules():
 
 @app.route('/api/ml/questions/recent')
 def api_recent_questions():
+    initialize_database()
+    
     user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
     if not user:
         return jsonify({"error": "Usuário não encontrado"}), 404
@@ -690,6 +720,8 @@ def api_recent_questions():
 
 @app.route('/api/ml/absence')
 def api_absence():
+    initialize_database()
+    
     user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
     if not user:
         return jsonify({"error": "Usuário não encontrado"}), 404
@@ -706,10 +738,10 @@ def api_absence():
         "active": config.is_active
     } for config in configs])
 
-if __name__ == '__main__':
-    # Criar tabelas e dados iniciais
-    create_tables_and_data()
-    print("✅ Banco de dados em memória criado com sucesso!")
+# Inicializar banco na primeira requisição
+@app.before_first_request
+def before_first_request():
+    initialize_database()
     
     # Iniciar monitoramento em thread separada
     monitor_thread = threading.Thread(target=monitor_questions, daemon=True)
@@ -719,7 +751,8 @@ if __name__ == '__main__':
     print("🚀 Bot do Mercado Livre iniciado com sucesso!")
     print(f"🔑 Token: {ML_ACCESS_TOKEN[:20]}...")
     print(f"👤 User ID: {ML_USER_ID}")
-    
+
+if __name__ == '__main__':
     # Executar aplicação
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 10000)), debug=False)
 
