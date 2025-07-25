@@ -85,15 +85,21 @@ class TokenLog(db.Model):
 # Variável global para controlar inicialização
 _initialized = False
 
-# Função para criar tabelas e dados iniciais
-def create_tables_and_data():
+# Função para FORÇAR recriação do banco
+def force_recreate_database():
     global _initialized, token_expires_at
-    if _initialized:
-        return
     
     try:
         with app.app_context():
+            print("🔄 Forçando recriação do banco de dados...")
+            
+            # Dropar todas as tabelas
+            db.drop_all()
+            print("✅ Tabelas antigas removidas")
+            
+            # Criar todas as tabelas novamente
             db.create_all()
+            print("✅ Tabelas novas criadas")
             
             # Verificar se usuário já existe
             user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
@@ -148,18 +154,19 @@ def create_tables_and_data():
                     db.session.add(config)
                 
                 db.session.commit()
-                print("✅ Banco de dados inicializado com sucesso!")
+                print("✅ Dados iniciais criados com sucesso!")
                 
             # Definir expiração do token
             token_expires_at = user.token_expires_at
             _initialized = True
+            print("✅ Banco de dados inicializado com sucesso!")
                 
     except Exception as e:
         print(f"❌ Erro ao inicializar banco: {e}")
 
 def initialize_database():
     if not _initialized:
-        create_tables_and_data()
+        force_recreate_database()
 
 # Função SIMPLES para renovar token
 def renew_token_simple():
@@ -222,7 +229,7 @@ def renew_token_simple():
         print(f"❌ Erro na renovação: {e}")
         return False
 
-# Função para verificar se token precisa renovação
+# Função para verificar se token precisa renovação (A CADA 5 HORAS)
 def check_and_renew_token():
     global token_expires_at
     
@@ -233,13 +240,13 @@ def check_and_renew_token():
         now = datetime.utcnow()
         time_left = token_expires_at - now
         
-        # Se faltam menos de 30 minutos, renovar
-        if time_left.total_seconds() < 1800:  # 30 minutos
+        # Se faltam menos de 1 hora, renovar
+        if time_left.total_seconds() < 3600:  # 1 hora
             print(f"⏰ Token expira em {time_left}. Renovando...")
             return renew_token_simple()
         else:
-            minutes_left = int(time_left.total_seconds() / 60)
-            print(f"✅ Token válido por mais {minutes_left} minutos")
+            hours_left = int(time_left.total_seconds() / 3600)
+            print(f"✅ Token válido por mais {hours_left} horas")
             return True
             
     except Exception as e:
@@ -400,13 +407,20 @@ def process_questions():
     except Exception as e:
         print(f"❌ Erro ao processar perguntas: {e}")
 
-# Função de monitoramento SIMPLES
+# Função de monitoramento SIMPLES (verifica token a cada 5 horas)
 def monitor_questions():
+    token_check_counter = 0
     while True:
         try:
             with app.app_context():
+                # Verificar token a cada 5 horas (300 ciclos de 60s)
+                if token_check_counter % 300 == 0:
+                    check_and_renew_token()
+                
                 process_questions()
-            time.sleep(60)  # Verificar a cada 60 segundos
+                token_check_counter += 1
+                
+            time.sleep(60)  # Verificar perguntas a cada 60 segundos
         except Exception as e:
             print(f"❌ Erro no monitoramento: {e}")
             time.sleep(60)
@@ -491,13 +505,18 @@ def dashboard():
                 .nav a:hover { background: #2968c8; }
                 .status-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 15px; }
                 .status-item { padding: 10px; background: #f8f9fa; border-radius: 5px; }
+                .success { background: #d4edda; color: #155724; padding: 15px; border-radius: 5px; margin-bottom: 20px; }
             </style>
         </head>
         <body>
             <div class="container">
+                <div class="success">
+                    ✅ <strong>Banco de dados recriado com sucesso!</strong> Estrutura corrigida e funcionando.
+                </div>
+                
                 <div class="header">
                     <h1>🤖 Bot Mercado Livre - Dashboard</h1>
-                    <p>Sistema de Resposta Automática</p>
+                    <p>Sistema de Resposta Automática - Renovação a cada 5 horas</p>
                 </div>
                 
                 <div class="nav">
@@ -604,7 +623,7 @@ initialize_database()
 # Iniciar monitoramento
 monitor_thread = threading.Thread(target=monitor_questions, daemon=True)
 monitor_thread.start()
-print("✅ Monitoramento de perguntas iniciado!")
+print("✅ Monitoramento iniciado - Verifica token a cada 5 horas!")
 
 print("🚀 Bot do Mercado Livre iniciado com sucesso!")
 print(f"🔑 Token: {current_token[:20]}...")
