@@ -451,28 +451,28 @@ def process_questions():
                     response_type = None
                     keywords_matched = None
                     
-                    # 1. VERIFICAR HORÁRIO DE AUSÊNCIA PRIMEIRO
-                    absence_message = is_absence_time()
-                    if absence_message:
-                        if answer_question_ml(question_id, absence_message):
-                            question.response_text = absence_message
+                    # 1. BUSCAR RESPOSTA AUTOMÁTICA POR PALAVRAS-CHAVE PRIMEIRO
+                    auto_response, matched_keywords = find_auto_response(question_text)
+                    if auto_response:
+                        if answer_question_ml(question_id, auto_response):
+                            question.response_text = auto_response
                             question.is_answered = True
                             question.answered_automatically = True
                             question.answered_at = get_local_time_utc()
-                            response_type = "absence"
-                            add_debug_log(f"✅ Respondida com mensagem de ausência")
+                            response_type = "auto"
+                            keywords_matched = matched_keywords
+                            add_debug_log(f"✅ Respondida automaticamente")
                     else:
-                        # 2. BUSCAR RESPOSTA AUTOMÁTICA POR PALAVRAS-CHAVE
-                        auto_response, matched_keywords = find_auto_response(question_text)
-                        if auto_response:
-                            if answer_question_ml(question_id, auto_response):
-                                question.response_text = auto_response
+                        # 2. SE NÃO HOUVER REGRA, VERIFICAR HORÁRIO DE AUSÊNCIA
+                        absence_message = is_absence_time()
+                        if absence_message:
+                            if answer_question_ml(question_id, absence_message):
+                                question.response_text = absence_message
                                 question.is_answered = True
                                 question.answered_automatically = True
                                 question.answered_at = get_local_time_utc()
-                                response_type = "auto"
-                                keywords_matched = matched_keywords
-                                add_debug_log(f"✅ Respondida automaticamente")
+                                response_type = "absence"
+                                add_debug_log(f"✅ Respondida com mensagem de ausência")
                     
                     # Salvar histórico de resposta
                     if response_type:
@@ -1014,9 +1014,10 @@ def webhook_ml():
                     <html>
                     <head><title>Autorização Concluída</title></head>
                     <body>
-                        <h1>✅ Autorização Concluída!</h1>
-                        <p>Tokens atualizados com sucesso.</p>
+                        <h1>✅ Tokens Atualizados com Sucesso!</h1>
                         <p><strong>User ID:</strong> {result['user_id']}</p>
+                        <p><strong>Token:</strong> {result['access_token'][:20]}...</p>
+                        <p>O sistema já está usando os novos tokens.</p>
                         <p><a href="/">← Voltar ao Dashboard</a></p>
                     </body>
                     </html>
