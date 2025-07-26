@@ -1016,7 +1016,7 @@ def webhook_ml():
                     <body>
                         <h1>✅ Tokens Atualizados com Sucesso!</h1>
                         <p><strong>User ID:</strong> {result['user_id']}</p>
-                        <p><strong>Token:</strong> {result['access_token'][:20]}...</p>
+                        <p><strong>Token:</strong> {code}</p>
                         <p>O sistema já está usando os novos tokens.</p>
                         <p><a href="/">← Voltar ao Dashboard</a></p>
                     </body>
