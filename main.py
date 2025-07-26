@@ -88,6 +88,261 @@ REDIRECT_URIS = [
     "http://localhost:5000/api/ml/auth-callback"
 ]
 
+# ========== SISTEMA DE RENOVAÇÃO AUTOMÁTICA DE TOKENS ==========
+# Implementação da Estratégia 3: Renovação Baseada em Tempo
+# Renovação automática a cada 5 horas (1 hora de sobra)
+
+import threading
+import time
+
+class AutoTokenRefresh:
+    """Sistema de renovação automática de tokens baseado em tempo"""
+    
+    def __init__(self):
+        self.refresh_timer = None
+        self.is_refreshing = False
+        self.token_created_at = None
+        self.token_expires_at = None
+        self.auto_refresh_enabled = True
+        self.refresh_interval = 5 * 3600  # 5 horas em segundos
+        
+    def start_auto_refresh(self, expires_in=21600):
+        """
+        Inicia sistema de renovação automática
+        Args:
+            expires_in: Tempo de expiração em segundos (padrão: 6 horas)
+        """
+        if not self.auto_refresh_enabled:
+            add_debug_log("🔄 Auto-renovação desabilitada")
+            return
+            
+        # Cancelar timer anterior se existir
+        if self.refresh_timer:
+            self.refresh_timer.cancel()
+            add_debug_log("⏹️ Timer anterior cancelado")
+        
+        # Calcular quando renovar (5 horas = 18000 segundos)
+        refresh_delay = min(self.refresh_interval, max(expires_in - 3600, 300))  # Min 5 minutos
+        
+        # Atualizar timestamps
+        self.token_created_at = time.time()
+        self.token_expires_at = self.token_created_at + expires_in
+        
+        # Agendar renovação
+        self.refresh_timer = threading.Timer(refresh_delay, self.auto_refresh)
+        self.refresh_timer.start()
+        
+        # Log detalhado
+        refresh_time = datetime.fromtimestamp(self.token_created_at + refresh_delay)
+        expires_time = datetime.fromtimestamp(self.token_expires_at)
+        
+        add_debug_log(f"🕐 Auto-renovação agendada para {refresh_delay}s ({refresh_time.strftime('%H:%M:%S')})")
+        add_debug_log(f"⏰ Token expira em: {expires_time.strftime('%H:%M:%S')}")
+        
+    def auto_refresh(self):
+        """Executa renovação automática do token"""
+        if self.is_refreshing:
+            add_debug_log("⚠️ Renovação já em andamento, ignorando")
+            return
+            
+        self.is_refreshing = True
+        
+        try:
+            add_debug_log("🔄 Iniciando renovação automática de token...")
+            
+            # Usar função existente de renovação
+            success, result = self.process_refresh_token_internal()
+            
+            if success:
+                # Atualizar tokens no sistema
+                self.update_system_tokens_internal(
+                    result['access_token'],
+                    result['refresh_token'],
+                    result['user_id']
+                )
+                
+                # Agendar próxima renovação
+                self.start_auto_refresh(result.get('expires_in', 21600))
+                add_debug_log("✅ Renovação automática concluída com sucesso")
+                
+            else:
+                # Tentar novamente em 10 minutos
+                retry_delay = 600
+                self.refresh_timer = threading.Timer(retry_delay, self.auto_refresh)
+                self.refresh_timer.start()
+                add_debug_log(f"❌ Falha na renovação automática, tentando novamente em {retry_delay//60} min")
+                
+        except Exception as e:
+            add_debug_log(f"❌ Erro na renovação automática: {e}")
+            # Tentar novamente em 5 minutos
+            retry_delay = 300
+            self.refresh_timer = threading.Timer(retry_delay, self.auto_refresh)
+            self.refresh_timer.start()
+            add_debug_log(f"🔄 Reagendando tentativa em {retry_delay//60} min")
+            
+        finally:
+            self.is_refreshing = False
+    
+    def process_refresh_token_internal(self):
+        """Processa renovação usando refresh token atual"""
+        global ML_REFRESH_TOKEN
+        
+        if not ML_REFRESH_TOKEN:
+            return False, {'error': 'Refresh token não disponível'}
+        
+        try:
+            url = "https://api.mercadolibre.com/oauth/token"
+            data = {
+                'grant_type': 'refresh_token',
+                'client_id': ML_CLIENT_ID,
+                'client_secret': ML_CLIENT_SECRET,
+                'refresh_token': ML_REFRESH_TOKEN
+            }
+            
+            add_debug_log("🔄 Enviando requisição de renovação...")
+            response = requests.post(url, data=data, timeout=30)
+            
+            if response.status_code == 200:
+                token_data = response.json()
+                
+                result = {
+                    'success': True,
+                    'access_token': token_data['access_token'],
+                    'refresh_token': token_data.get('refresh_token', ''),
+                    'user_id': str(token_data['user_id']),
+                    'expires_in': token_data.get('expires_in', 21600)
+                }
+                
+                add_debug_log("✅ Renovação via refresh token bem-sucedida")
+                return True, result
+                
+            else:
+                error_msg = f"Erro {response.status_code}: {response.text}"
+                add_debug_log(f"❌ Falha na renovação: {error_msg}")
+                return False, {'error': error_msg}
+                
+        except Exception as e:
+            add_debug_log(f"❌ Erro na requisição de renovação: {e}")
+            return False, {'error': str(e)}
+    
+    def update_system_tokens_internal(self, access_token, refresh_token, user_id):
+        """Atualiza tokens no sistema"""
+        global ML_ACCESS_TOKEN, ML_REFRESH_TOKEN, ML_USER_ID
+        
+        # Atualizar variáveis globais
+        ML_ACCESS_TOKEN = access_token
+        ML_REFRESH_TOKEN = refresh_token
+        ML_USER_ID = user_id
+        
+        # Atualizar no banco de dados
+        try:
+            user = User.query.filter_by(ml_user_id=user_id).first()
+            if user:
+                user.access_token = access_token
+                user.refresh_token = refresh_token
+                user.token_expires_at = datetime.utcnow() + timedelta(hours=6)
+                user.updated_at = get_local_time_utc()
+                db.session.commit()
+                add_debug_log("💾 Tokens atualizados no banco de dados")
+            else:
+                add_debug_log("⚠️ Usuário não encontrado no banco para atualizar tokens")
+                
+        except Exception as e:
+            add_debug_log(f"❌ Erro ao atualizar tokens no banco: {e}")
+    
+    def get_token_status(self):
+        """Retorna status atual do token"""
+        if not self.token_created_at or not self.token_expires_at:
+            return {
+                'status': 'unknown',
+                'message': 'Token não inicializado',
+                'time_remaining': 0,
+                'next_refresh': 0,
+                'auto_refresh_enabled': self.auto_refresh_enabled
+            }
+        
+        current_time = time.time()
+        time_remaining = max(0, self.token_expires_at - current_time)
+        
+        # Calcular próxima renovação
+        next_refresh_time = self.token_created_at + self.refresh_interval
+        next_refresh = max(0, next_refresh_time - current_time)
+        
+        # Determinar status
+        if time_remaining <= 0:
+            status = 'expired'
+            message = 'Token expirado'
+        elif time_remaining <= 3600:  # Menos de 1 hora
+            status = 'expiring'
+            message = f'Token expira em {int(time_remaining//60)} minutos'
+        else:
+            status = 'active'
+            message = f'Token válido por {int(time_remaining//3600)}h {int((time_remaining%3600)//60)}min'
+        
+        return {
+            'status': status,
+            'message': message,
+            'time_remaining': int(time_remaining),
+            'next_refresh': int(next_refresh),
+            'auto_refresh_enabled': self.auto_refresh_enabled,
+            'is_refreshing': self.is_refreshing
+        }
+    
+    def stop_auto_refresh(self):
+        """Para o sistema de renovação automática"""
+        if self.refresh_timer:
+            self.refresh_timer.cancel()
+            self.refresh_timer = None
+            add_debug_log("⏹️ Sistema de auto-renovação parado")
+    
+    def enable_auto_refresh(self):
+        """Habilita renovação automática"""
+        self.auto_refresh_enabled = True
+        add_debug_log("✅ Auto-renovação habilitada")
+    
+    def disable_auto_refresh(self):
+        """Desabilita renovação automática"""
+        self.auto_refresh_enabled = False
+        self.stop_auto_refresh()
+        add_debug_log("❌ Auto-renovação desabilitada")
+
+# Instância global do sistema de renovação automática
+auto_refresh_manager = AutoTokenRefresh()
+
+def initialize_auto_refresh():
+    """Inicializa sistema de renovação automática baseado no token atual"""
+    try:
+        # Verificar se temos refresh token
+        if not ML_REFRESH_TOKEN:
+            add_debug_log("⚠️ Refresh token não disponível, auto-renovação não iniciada")
+            return False
+        
+        # Calcular tempo restante do token atual (assumindo 6 horas de validade)
+        # Em produção, isso seria obtido do banco de dados
+        current_time = time.time()
+        
+        # Verificar se temos informação de quando o token foi criado
+        user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
+        if user and user.token_expires_at:
+            # Usar informação do banco
+            expires_at = user.token_expires_at.timestamp()
+            time_remaining = max(0, expires_at - current_time)
+        else:
+            # Assumir token recém-criado (6 horas de validade)
+            time_remaining = 21600  # 6 horas
+        
+        if time_remaining > 0:
+            auto_refresh_manager.start_auto_refresh(int(time_remaining))
+            add_debug_log(f"🚀 Sistema de auto-renovação inicializado com {int(time_remaining//3600)}h restantes")
+            return True
+        else:
+            add_debug_log("⚠️ Token já expirado, auto-renovação não iniciada")
+            return False
+            
+    except Exception as e:
+        add_debug_log(f"❌ Erro ao inicializar auto-renovação: {e}")
+        return False
+
 # ========== SISTEMA DE DEBUG E LOGS ==========
 # Baseado no módulo modulo_debug_logs_tempo_real.py
 DEBUG_LOGS = []
@@ -1440,7 +1695,7 @@ def dashboard():
             avg_response = db.session.query(db.func.avg(ResponseHistory.response_time)).scalar()
             avg_response = round(avg_response, 2) if avg_response else 0
             
-            # Status do token
+            # Status do token com renovação automática
             token_valid = True
             token_message = "Token válido"
             try:
@@ -1454,24 +1709,176 @@ def dashboard():
                 token_valid = False
                 token_message = "Erro de conexão"
             
+            # Obter status da renovação automática
+            token_status_info = auto_refresh_manager.get_token_status()
+            
             current_time = get_local_time().strftime("%H:%M:%S")
             
             # Criar conteúdo do dashboard
             content = create_header("🤖 Bot do Mercado Livre", f"Sistema ativo - {current_time}")
             content += create_navigation("")
             
-            # Status do token
+            # Status do token com renovação automática
             token_color = "#28a745" if token_valid else "#dc3545"
             token_status = "✅ Válido" if token_valid else "❌ Inválido"
             
+            # Cores para status de renovação
+            status_colors = {
+                'active': '#28a745',
+                'expiring': '#ffc107', 
+                'expired': '#dc3545',
+                'unknown': '#6c757d'
+            }
+            
+            refresh_color = status_colors.get(token_status_info['status'], '#6c757d')
+            
+            # Formatação de tempo
+            def format_time_remaining(seconds):
+                if seconds <= 0:
+                    return "Expirado"
+                hours = seconds // 3600
+                minutes = (seconds % 3600) // 60
+                if hours > 0:
+                    return f"{hours}h {minutes}min"
+                else:
+                    return f"{minutes}min"
+            
             content += f"""
             <div class="card">
-                <h3>🔑 Status do Token</h3>
-                <p><strong>Status:</strong> <span style="color: {token_color}; font-weight: bold;">{token_status}</span></p>
-                <p><strong>Token:</strong> {ML_ACCESS_TOKEN[:20]}...</p>
-                <p><strong>User ID:</strong> {ML_USER_ID}</p>
-                <p><strong>Mensagem:</strong> {token_message}</p>
+                <h3>🔑 Status do Token e Renovação Automática</h3>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px;">
+                    <div>
+                        <h4>📊 Status Atual</h4>
+                        <p><strong>Status:</strong> <span style="color: {token_color}; font-weight: bold;">{token_status}</span></p>
+                        <p><strong>Token:</strong> {ML_ACCESS_TOKEN[:20]}...</p>
+                        <p><strong>User ID:</strong> {ML_USER_ID}</p>
+                        <p><strong>Conexão:</strong> {token_message}</p>
+                    </div>
+                    <div>
+                        <h4>🔄 Renovação Automática</h4>
+                        <p><strong>Status:</strong> <span style="color: {refresh_color}; font-weight: bold;">{token_status_info['message']}</span></p>
+                        <p><strong>Tempo restante:</strong> <span id="time-remaining" style="font-weight: bold; color: {refresh_color};">{format_time_remaining(token_status_info['time_remaining'])}</span></p>
+                        <p><strong>Próxima renovação:</strong> <span id="next-refresh" style="font-weight: bold;">{format_time_remaining(token_status_info['next_refresh'])}</span></p>
+                        <p><strong>Auto-renovação:</strong> <span style="color: {'#28a745' if token_status_info['auto_refresh_enabled'] else '#dc3545'}; font-weight: bold;">{'✅ Ativa' if token_status_info['auto_refresh_enabled'] else '❌ Inativa'}</span></p>
+                        {f'<p><strong>Status:</strong> <span style="color: #ffc107; font-weight: bold;">🔄 Renovando...</span></p>' if token_status_info['is_refreshing'] else ''}
+                    </div>
+                </div>
+                
+                <div style="background: #f8f9fa; padding: 15px; border-radius: 6px; margin-top: 15px;">
+                    <h4 style="margin-top: 0;">⏱️ Countdown em Tempo Real</h4>
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+                        <div style="text-align: center; padding: 15px; background: white; border-radius: 6px; border: 2px solid {refresh_color};">
+                            <h5 style="margin: 0; color: {refresh_color};">Token Expira Em</h5>
+                            <div id="token-countdown" style="font-size: 1.5em; font-weight: bold; color: {refresh_color}; margin-top: 10px;">
+                                {format_time_remaining(token_status_info['time_remaining'])}
+                            </div>
+                        </div>
+                        <div style="text-align: center; padding: 15px; background: white; border-radius: 6px; border: 2px solid #3483fa;">
+                            <h5 style="margin: 0; color: #3483fa;">Renovação Em</h5>
+                            <div id="refresh-countdown" style="font-size: 1.5em; font-weight: bold; color: #3483fa; margin-top: 10px;">
+                                {format_time_remaining(token_status_info['next_refresh'])}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <div style="margin-top: 15px; text-align: center;">
+                    <button onclick="toggleAutoRefresh()" class="btn {'btn-danger' if token_status_info['auto_refresh_enabled'] else 'btn-success'}" style="margin-right: 10px;">
+                        {'🛑 Desabilitar Auto-renovação' if token_status_info['auto_refresh_enabled'] else '🚀 Habilitar Auto-renovação'}
+                    </button>
+                    <button onclick="forceRefresh()" class="btn btn-warning" style="margin-right: 10px;">
+                        🔄 Forçar Renovação Agora
+                    </button>
+                    <a href="/renovar-tokens" class="btn">🔧 Renovação Manual</a>
+                </div>
             </div>
+            
+            <script>
+                // Atualizar countdown a cada segundo
+                let tokenTimeRemaining = {token_status_info['time_remaining']};
+                let refreshTimeRemaining = {token_status_info['next_refresh']};
+                
+                function formatTime(seconds) {{
+                    if (seconds <= 0) return "Expirado";
+                    const hours = Math.floor(seconds / 3600);
+                    const minutes = Math.floor((seconds % 3600) / 60);
+                    const secs = seconds % 60;
+                    
+                    if (hours > 0) {{
+                        return `${{hours}}h ${{minutes}}min ${{secs}}s`;
+                    }} else if (minutes > 0) {{
+                        return `${{minutes}}min ${{secs}}s`;
+                    }} else {{
+                        return `${{secs}}s`;
+                    }}
+                }}
+                
+                function updateCountdowns() {{
+                    const tokenElement = document.getElementById('token-countdown');
+                    const refreshElement = document.getElementById('refresh-countdown');
+                    
+                    if (tokenElement) {{
+                        tokenElement.textContent = formatTime(Math.max(0, tokenTimeRemaining));
+                        if (tokenTimeRemaining <= 0) {{
+                            tokenElement.style.color = '#dc3545';
+                            tokenElement.parentElement.style.borderColor = '#dc3545';
+                        }} else if (tokenTimeRemaining <= 3600) {{
+                            tokenElement.style.color = '#ffc107';
+                            tokenElement.parentElement.style.borderColor = '#ffc107';
+                        }}
+                    }}
+                    
+                    if (refreshElement) {{
+                        refreshElement.textContent = formatTime(Math.max(0, refreshTimeRemaining));
+                    }}
+                    
+                    tokenTimeRemaining = Math.max(0, tokenTimeRemaining - 1);
+                    refreshTimeRemaining = Math.max(0, refreshTimeRemaining - 1);
+                }}
+                
+                // Atualizar a cada segundo
+                setInterval(updateCountdowns, 1000);
+                
+                // Recarregar página a cada 5 minutos para atualizar dados
+                setTimeout(() => {{
+                    window.location.reload();
+                }}, 300000);
+                
+                async function toggleAutoRefresh() {{
+                    try {{
+                        const response = await fetch('/api/tokens/toggle-auto-refresh', {{
+                            method: 'POST'
+                        }});
+                        const result = await response.json();
+                        if (result.success) {{
+                            window.location.reload();
+                        }} else {{
+                            alert('Erro: ' + result.message);
+                        }}
+                    }} catch (error) {{
+                        alert('Erro ao alterar auto-renovação');
+                    }}
+                }}
+                
+                async function forceRefresh() {{
+                    if (confirm('Deseja forçar a renovação do token agora?')) {{
+                        try {{
+                            const response = await fetch('/api/tokens/force-refresh', {{
+                                method: 'POST'
+                            }});
+                            const result = await response.json();
+                            if (result.success) {{
+                                alert('Token renovado com sucesso!');
+                                window.location.reload();
+                            }} else {{
+                                alert('Erro na renovação: ' + result.message);
+                            }}
+                        }} catch (error) {{
+                            alert('Erro ao forçar renovação');
+                        }}
+                    }}
+                }}
+            </script>
             """
             
             # Estatísticas
@@ -2148,6 +2555,152 @@ def api_delete_absence(config_id):
         add_debug_log(f"❌ Erro ao excluir configuração: {e}")
         return jsonify({"error": str(e)}), 500
 
+# ========== APIs DE CONTROLE DE RENOVAÇÃO AUTOMÁTICA ==========
+
+@app.route('/api/tokens/status', methods=['GET'])
+def api_token_status():
+    """API para obter status detalhado do token e renovação automática"""
+    try:
+        # Status do token via API ML
+        token_valid = True
+        token_message = "Token válido"
+        user_info = None
+        
+        try:
+            url = "https://api.mercadolibre.com/users/me"
+            headers = {"Authorization": f"Bearer {ML_ACCESS_TOKEN}"}
+            response = requests.get(url, headers=headers, timeout=10)
+            if response.status_code == 200:
+                user_info = response.json()
+                token_message = f"Conectado como {user_info.get('nickname', 'N/A')}"
+            else:
+                token_valid = False
+                token_message = f"Erro {response.status_code}"
+        except:
+            token_valid = False
+            token_message = "Erro de conexão"
+        
+        # Status da renovação automática
+        refresh_status = auto_refresh_manager.get_token_status()
+        
+        return jsonify({
+            "success": True,
+            "token": {
+                "valid": token_valid,
+                "message": token_message,
+                "access_token": ML_ACCESS_TOKEN[:20] + "..." if ML_ACCESS_TOKEN else "N/A",
+                "user_id": ML_USER_ID,
+                "user_info": user_info
+            },
+            "auto_refresh": refresh_status,
+            "timestamp": get_local_time().isoformat()
+        })
+        
+    except Exception as e:
+        add_debug_log(f"❌ Erro ao obter status do token: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@app.route('/api/tokens/toggle-auto-refresh', methods=['POST'])
+def api_toggle_auto_refresh():
+    """API para habilitar/desabilitar renovação automática"""
+    try:
+        current_status = auto_refresh_manager.auto_refresh_enabled
+        
+        if current_status:
+            auto_refresh_manager.disable_auto_refresh()
+            message = "Auto-renovação desabilitada"
+            add_debug_log("🛑 Auto-renovação desabilitada via API")
+        else:
+            auto_refresh_manager.enable_auto_refresh()
+            # Tentar inicializar se temos refresh token
+            if ML_REFRESH_TOKEN:
+                initialize_auto_refresh()
+            message = "Auto-renovação habilitada"
+            add_debug_log("🚀 Auto-renovação habilitada via API")
+        
+        return jsonify({
+            "success": True,
+            "message": message,
+            "auto_refresh_enabled": auto_refresh_manager.auto_refresh_enabled
+        })
+        
+    except Exception as e:
+        add_debug_log(f"❌ Erro ao alterar auto-renovação: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@app.route('/api/tokens/force-refresh', methods=['POST'])
+def api_force_refresh():
+    """API para forçar renovação imediata do token"""
+    try:
+        add_debug_log("🔄 Renovação forçada via API iniciada...")
+        
+        # Verificar se já está renovando
+        if auto_refresh_manager.is_refreshing:
+            return jsonify({
+                "success": False,
+                "error": "Renovação já em andamento"
+            }), 400
+        
+        # Executar renovação
+        success, result = auto_refresh_manager.process_refresh_token_internal()
+        
+        if success:
+            # Atualizar tokens no sistema
+            auto_refresh_manager.update_system_tokens_internal(
+                result['access_token'],
+                result['refresh_token'],
+                result['user_id']
+            )
+            
+            # Reiniciar auto-renovação com novo token
+            auto_refresh_manager.start_auto_refresh(result.get('expires_in', 21600))
+            
+            add_debug_log("✅ Renovação forçada concluída com sucesso")
+            
+            return jsonify({
+                "success": True,
+                "message": "Token renovado com sucesso",
+                "token_info": {
+                    "access_token": result['access_token'][:20] + "...",
+                    "user_id": result['user_id'],
+                    "expires_in": result.get('expires_in', 21600)
+                }
+            })
+        else:
+            add_debug_log(f"❌ Falha na renovação forçada: {result.get('error', 'Erro desconhecido')}")
+            return jsonify({
+                "success": False,
+                "error": result.get('error', 'Erro na renovação')
+            }), 400
+            
+    except Exception as e:
+        add_debug_log(f"❌ Erro na renovação forçada: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@app.route('/api/tokens/refresh-info', methods=['GET'])
+def api_refresh_info():
+    """API para obter informações detalhadas sobre renovação"""
+    try:
+        status = auto_refresh_manager.get_token_status()
+        
+        # Informações adicionais
+        info = {
+            "refresh_interval_hours": auto_refresh_manager.refresh_interval / 3600,
+            "has_refresh_token": bool(ML_REFRESH_TOKEN),
+            "system_time": get_local_time().isoformat(),
+            "uptime_seconds": time.time() - (auto_refresh_manager.token_created_at or time.time())
+        }
+        
+        return jsonify({
+            "success": True,
+            "status": status,
+            "info": info
+        })
+        
+    except Exception as e:
+        add_debug_log(f"❌ Erro ao obter info de renovação: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
 
 # ========== INICIALIZAÇÃO E MONITORAMENTO DO SISTEMA ==========
 
@@ -2162,6 +2715,13 @@ def start_background_tasks():
         # Criar dados padrão se necessário
         create_default_data()
         
+        # Inicializar sistema de renovação automática
+        if ML_REFRESH_TOKEN:
+            initialize_auto_refresh()
+            add_debug_log("🔄 Sistema de renovação automática inicializado")
+        else:
+            add_debug_log("⚠️ Refresh token não disponível - renovação automática não iniciada")
+        
         # Iniciar monitoramento de perguntas em thread separada
         monitor_thread = threading.Thread(target=monitor_questions, daemon=True)
         monitor_thread.start()
@@ -2172,6 +2732,7 @@ def start_background_tasks():
         add_debug_log("🤖 Monitoramento de perguntas ativo (30s)")
         add_debug_log("🌙 Sistema de ausência configurado")
         add_debug_log("🔄 Renovação manual de tokens disponível")
+        add_debug_log("🔄 Renovação automática de tokens ativa (5h)")
         add_debug_log("📊 Interface web completa disponível")
         
     except Exception as e:
