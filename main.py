@@ -258,7 +258,8 @@ class AutoTokenRefresh:
                 'message': 'Token não inicializado',
                 'time_remaining': 0,
                 'next_refresh': 0,
-                'auto_refresh_enabled': self.auto_refresh_enabled
+                'auto_refresh_enabled': self.auto_refresh_enabled,
+                'is_refreshing': False
             }
         
         current_time = time.time()
@@ -285,7 +286,7 @@ class AutoTokenRefresh:
             'time_remaining': int(time_remaining),
             'next_refresh': int(next_refresh),
             'auto_refresh_enabled': self.auto_refresh_enabled,
-            'is_refreshing': self.is_refreshing
+            'is_refreshing': getattr(self, 'is_refreshing', False)
         }
     
     def stop_auto_refresh(self):
@@ -1709,8 +1710,19 @@ def dashboard():
                 token_valid = False
                 token_message = "Erro de conexão"
             
-            # Obter status da renovação automática
-            token_status_info = auto_refresh_manager.get_token_status()
+            # Obter status da renovação automática com tratamento de erro
+            try:
+                token_status_info = auto_refresh_manager.get_token_status()
+            except Exception as e:
+                add_debug_log(f"❌ Erro ao obter status de renovação: {e}")
+                token_status_info = {
+                    'status': 'unknown',
+                    'message': 'Erro ao obter status',
+                    'time_remaining': 0,
+                    'next_refresh': 0,
+                    'auto_refresh_enabled': False,
+                    'is_refreshing': False
+                }
             
             current_time = get_local_time().strftime("%H:%M:%S")
             
