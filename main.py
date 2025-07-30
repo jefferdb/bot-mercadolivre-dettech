@@ -437,13 +437,9 @@ class ResponseHistory(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
     question_id = db.Column(db.Integer, db.ForeignKey('questions.id'), nullable=False)
-    question_text = db.Column(db.Text)  # Texto da pergunta (para compatibilidade)
-    response_text = db.Column(db.Text)  # Texto da resposta (para compatibilidade)
     response_type = db.Column(db.String(20), nullable=False)  # 'auto', 'absence', 'manual'
-    rule_used = db.Column(db.String(200))  # Regra utilizada (para compatibilidade)
     keywords_matched = db.Column(db.String(200))
     response_time = db.Column(db.Float)  # tempo em segundos para responder
-    from_user = db.Column(db.String(100))  # Usuário que fez a pergunta (para compatibilidade)
     created_at = db.Column(db.DateTime, default=get_local_time_utc)
 
 class TokenLog(db.Model):
@@ -740,13 +736,9 @@ def process_questions():
                         history = ResponseHistory(
                             user_id=user.id,
                             question_id=question.id,
-                            question_text=question_text,
-                            response_text=question.response_text,
                             response_type=response_type,
-                            rule_used=matched_keywords,
                             keywords_matched=keywords_matched,
-                            response_time=response_time,
-                            from_user=q.get("from", {}).get("user_id", "")
+                            response_time=response_time
                         )
                         db.session.add(history)
                     
