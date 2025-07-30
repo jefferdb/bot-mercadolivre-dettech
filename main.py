@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-BOT MERCADO LIVRE - SISTEMA COMPLETO COM LAYOUT MODERNO
-Integração do layout moderno criado com o script funcional atual
-Data: 30/07/2025
+BOT MERCADO LIVRE - SISTEMA COMPLETO FUNCIONAL
+Criado com base nos módulos funcionais salvos e testados
+Data: 25/07/2025
 Credenciais atualizadas: 25/07/2025 - 18:00
 
 FUNCIONALIDADES INTEGRADAS:
-✅ Sistema de ausência e regras (funcional)
-✅ Renovação manual e automática de tokens
-✅ Layout moderno e sofisticado (Tailwind CSS)
+✅ Sistema de ausência e regras (main(1).py)
+✅ Renovação manual de tokens (interface web)
+✅ Layout minimalista e responsivo
 ✅ Histórico de respostas detalhado
 ✅ Debug e logs em tempo real
-✅ Interface responsiva (desktop/mobile)
+✅ Configuração de dados persistentes
 ✅ Fuso horário São Paulo (UTC-3)
 """
 
@@ -52,6 +52,7 @@ def format_local_time(utc_datetime):
     return local_dt
 
 # ========== CONFIGURAÇÃO DE DADOS PERSISTENTES ==========
+# Baseado no módulo configuracao_dados_render.py
 RENDER_DATA_DIR = "/opt/render/project/src/data"
 DATA_DIR = os.getenv('DATA_DIR', RENDER_DATA_DIR)
 if not os.path.exists(DATA_DIR):
@@ -79,7 +80,7 @@ ML_CLIENT_SECRET = os.getenv('ML_CLIENT_SECRET', 'jlR4As2x8uFY3RTpysLpuPhzC9yM9d
 ML_USER_ID = os.getenv('ML_USER_ID', '180617463')
 ML_REFRESH_TOKEN = os.getenv('ML_REFRESH_TOKEN', '')
 
-# URLs de redirect para renovação de tokens
+# URLs de redirect para renovação de tokens (webhook como padrão)
 REDIRECT_URIS = [
     "https://bot-mercadolivre-dettech.onrender.com/api/ml/webhook",
     "https://bot-mercadolivre-dettech.onrender.com/api/ml/auth-callback",
@@ -87,30 +88,13 @@ REDIRECT_URIS = [
     "http://localhost:5000/api/ml/auth-callback"
 ]
 
-# ========== SISTEMA DE LOGS DE DEBUG ==========
-debug_logs = []
-debug_logs_lock = threading.Lock()
-
-def add_debug_log(message, level="INFO"):
-    """Adiciona log de debug com timestamp local"""
-    with debug_logs_lock:
-        timestamp = get_local_time().strftime("%H:%M:%S")
-        log_entry = {
-            'timestamp': timestamp,
-            'message': message,
-            'level': level,
-            'full_timestamp': get_local_time().isoformat()
-        }
-        debug_logs.append(log_entry)
-        
-        # Manter apenas os últimos 100 logs
-        if len(debug_logs) > 100:
-            debug_logs.pop(0)
-        
-        # Log no console também
-        print(f"[{timestamp}] {message}")
-
 # ========== SISTEMA DE RENOVAÇÃO AUTOMÁTICA DE TOKENS ==========
+# Implementação da Estratégia 3: Renovação Baseada em Tempo
+# Renovação automática a cada 5 horas (1 hora de sobra)
+
+import threading
+import time
+
 class AutoTokenRefresh:
     """Sistema de renovação automática de tokens baseado em tempo"""
     
@@ -123,7 +107,11 @@ class AutoTokenRefresh:
         self.refresh_interval = 5 * 3600  # 5 horas em segundos
         
     def start_auto_refresh(self, expires_in=21600):
-        """Inicia sistema de renovação automática"""
+        """
+        Inicia sistema de renovação automática
+        Args:
+            expires_in: Tempo de expiração em segundos (padrão: 6 horas)
+        """
         if not self.auto_refresh_enabled:
             add_debug_log("🔄 Auto-renovação desabilitada")
             return
@@ -151,6 +139,117 @@ class AutoTokenRefresh:
         add_debug_log(f"🕐 Auto-renovação agendada para {refresh_delay}s ({refresh_time.strftime('%H:%M:%S')})")
         add_debug_log(f"⏰ Token expira em: {expires_time.strftime('%H:%M:%S')}")
         
+    def auto_refresh(self):
+        """Executa renovação automática do token"""
+        if self.is_refreshing:
+            add_debug_log("⚠️ Renovação já em andamento, ignorando")
+            return
+            
+        self.is_refreshing = True
+        
+        try:
+            add_debug_log("🔄 Iniciando renovação automática de token...")
+            
+            # Usar função existente de renovação
+            success, result = self.process_refresh_token_internal()
+            
+            if success:
+                # Atualizar tokens no sistema
+                self.update_system_tokens_internal(
+                    result['access_token'],
+                    result['refresh_token'],
+                    result['user_id']
+                )
+                
+                # Agendar próxima renovação
+                self.start_auto_refresh(result.get('expires_in', 21600))
+                add_debug_log("✅ Renovação automática concluída com sucesso")
+                
+            else:
+                # Tentar novamente em 10 minutos
+                retry_delay = 600
+                self.refresh_timer = threading.Timer(retry_delay, self.auto_refresh)
+                self.refresh_timer.start()
+                add_debug_log(f"❌ Falha na renovação automática, tentando novamente em {retry_delay//60} min")
+                
+        except Exception as e:
+            add_debug_log(f"❌ Erro na renovação automática: {e}")
+            # Tentar novamente em 5 minutos
+            retry_delay = 300
+            self.refresh_timer = threading.Timer(retry_delay, self.auto_refresh)
+            self.refresh_timer.start()
+            add_debug_log(f"🔄 Reagendando tentativa em {retry_delay//60} min")
+            
+        finally:
+            self.is_refreshing = False
+    
+    def process_refresh_token_internal(self):
+        """Processa renovação usando refresh token atual"""
+        global ML_REFRESH_TOKEN
+        
+        if not ML_REFRESH_TOKEN:
+            return False, {'error': 'Refresh token não disponível'}
+        
+        try:
+            url = "https://api.mercadolibre.com/oauth/token"
+            data = {
+                'grant_type': 'refresh_token',
+                'client_id': ML_CLIENT_ID,
+                'client_secret': ML_CLIENT_SECRET,
+                'refresh_token': ML_REFRESH_TOKEN
+            }
+            
+            add_debug_log("🔄 Enviando requisição de renovação...")
+            response = requests.post(url, data=data, timeout=30)
+            
+            if response.status_code == 200:
+                token_data = response.json()
+                
+                result = {
+                    'success': True,
+                    'access_token': token_data['access_token'],
+                    'refresh_token': token_data.get('refresh_token', ''),
+                    'user_id': str(token_data['user_id']),
+                    'expires_in': token_data.get('expires_in', 21600)
+                }
+                
+                add_debug_log("✅ Renovação via refresh token bem-sucedida")
+                return True, result
+                
+            else:
+                error_msg = f"Erro {response.status_code}: {response.text}"
+                add_debug_log(f"❌ Falha na renovação: {error_msg}")
+                return False, {'error': error_msg}
+                
+        except Exception as e:
+            add_debug_log(f"❌ Erro na requisição de renovação: {e}")
+            return False, {'error': str(e)}
+    
+    def update_system_tokens_internal(self, access_token, refresh_token, user_id):
+        """Atualiza tokens no sistema"""
+        global ML_ACCESS_TOKEN, ML_REFRESH_TOKEN, ML_USER_ID
+        
+        # Atualizar variáveis globais
+        ML_ACCESS_TOKEN = access_token
+        ML_REFRESH_TOKEN = refresh_token
+        ML_USER_ID = user_id
+        
+        # Atualizar no banco de dados
+        try:
+            user = User.query.filter_by(ml_user_id=user_id).first()
+            if user:
+                user.access_token = access_token
+                user.refresh_token = refresh_token
+                user.token_expires_at = datetime.utcnow() + timedelta(hours=6)
+                user.updated_at = get_local_time_utc()
+                db.session.commit()
+                add_debug_log("💾 Tokens atualizados no banco de dados")
+            else:
+                add_debug_log("⚠️ Usuário não encontrado no banco para atualizar tokens")
+                
+        except Exception as e:
+            add_debug_log(f"❌ Erro ao atualizar tokens no banco: {e}")
+    
     def get_token_status(self):
         """Retorna status atual do token"""
         if not self.token_created_at or not self.token_expires_at:
@@ -160,7 +259,7 @@ class AutoTokenRefresh:
                 'time_remaining': 0,
                 'next_refresh': 0,
                 'auto_refresh_enabled': self.auto_refresh_enabled,
-                'is_refreshing': getattr(self, 'is_refreshing', False)
+                'is_refreshing': False
             }
         
         current_time = time.time()
@@ -189,256 +288,1393 @@ class AutoTokenRefresh:
             'auto_refresh_enabled': self.auto_refresh_enabled,
             'is_refreshing': getattr(self, 'is_refreshing', False)
         }
+    
+    def stop_auto_refresh(self):
+        """Para o sistema de renovação automática"""
+        if self.refresh_timer:
+            self.refresh_timer.cancel()
+            self.refresh_timer = None
+            add_debug_log("⏹️ Sistema de auto-renovação parado")
+    
+    def enable_auto_refresh(self):
+        """Habilita renovação automática"""
+        self.auto_refresh_enabled = True
+        add_debug_log("✅ Auto-renovação habilitada")
+    
+    def disable_auto_refresh(self):
+        """Desabilita renovação automática"""
+        self.auto_refresh_enabled = False
+        self.stop_auto_refresh()
+        add_debug_log("❌ Auto-renovação desabilitada")
 
-# Instância global do gerenciador de renovação automática
+# Instância global do sistema de renovação automática
 auto_refresh_manager = AutoTokenRefresh()
 
+def initialize_auto_refresh():
+    """Inicializa sistema de renovação automática baseado no token atual"""
+    try:
+        # Verificar se temos refresh token
+        if not ML_REFRESH_TOKEN:
+            add_debug_log("⚠️ Refresh token não disponível, auto-renovação não iniciada")
+            return False
+        
+        # Calcular tempo restante do token atual (assumindo 6 horas de validade)
+        # Em produção, isso seria obtido do banco de dados
+        current_time = time.time()
+        
+        # Verificar se temos informação de quando o token foi criado
+        user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
+        if user and user.token_expires_at:
+            # Usar informação do banco
+            expires_at = user.token_expires_at.timestamp()
+            time_remaining = max(0, expires_at - current_time)
+        else:
+            # Assumir token recém-criado (6 horas de validade)
+            time_remaining = 21600  # 6 horas
+        
+        if time_remaining > 0:
+            auto_refresh_manager.start_auto_refresh(int(time_remaining))
+            add_debug_log(f"🚀 Sistema de auto-renovação inicializado com {int(time_remaining//3600)}h restantes")
+            return True
+        else:
+            add_debug_log("⚠️ Token já expirado, auto-renovação não iniciada")
+            return False
+            
+    except Exception as e:
+        add_debug_log(f"❌ Erro ao inicializar auto-renovação: {e}")
+        return False
+
+# ========== SISTEMA DE DEBUG E LOGS ==========
+# Baseado no módulo modulo_debug_logs_tempo_real.py
+DEBUG_LOGS = []
+MAX_DEBUG_LOGS = 100
+debug_lock = threading.Lock()
+
+def add_debug_log(message):
+    """Adiciona log de debug com timestamp"""
+    global DEBUG_LOGS
+    
+    with debug_lock:
+        timestamp = get_local_time().strftime("%H:%M:%S")
+        log_entry = f"[{timestamp}] {message}"
+        DEBUG_LOGS.append(log_entry)
+        
+        if len(DEBUG_LOGS) > MAX_DEBUG_LOGS:
+            DEBUG_LOGS.pop(0)
+        
+        print(log_entry)
+
+def get_debug_logs(limit=None):
+    """Retorna os logs de debug"""
+    with debug_lock:
+        if limit:
+            return DEBUG_LOGS[-limit:] if DEBUG_LOGS else ["Nenhum log ainda"]
+        return DEBUG_LOGS.copy() if DEBUG_LOGS else ["Nenhum log ainda"]
+
+def clear_debug_logs():
+    """Limpa todos os logs de debug"""
+    global DEBUG_LOGS
+    
+    with debug_lock:
+        DEBUG_LOGS.clear()
+        add_debug_log("🗑️ Logs de debug limpos")
+
 # ========== MODELOS DO BANCO DE DADOS ==========
+# Baseado nos módulos funcionais salvos
+
 class User(db.Model):
-    """Modelo para usuários do sistema"""
+    """Usuários do sistema"""
+    __tablename__ = 'users'
     id = db.Column(db.Integer, primary_key=True)
     ml_user_id = db.Column(db.String(50), unique=True, nullable=False)
-    access_token = db.Column(db.Text, nullable=False)
-    refresh_token = db.Column(db.Text)
+    access_token = db.Column(db.String(200), nullable=False)
+    refresh_token = db.Column(db.String(200))
     token_expires_at = db.Column(db.DateTime)
     created_at = db.Column(db.DateTime, default=get_local_time_utc)
-    updated_at = db.Column(db.DateTime, default=get_local_time_utc)
+    updated_at = db.Column(db.DateTime, default=get_local_time_utc, onupdate=get_local_time_utc)
 
-class Question(db.Model):
-    """Modelo para perguntas do ML"""
+class AutoResponse(db.Model):
+    """Regras de resposta automática por palavras-chave"""
+    __tablename__ = 'auto_responses'
     id = db.Column(db.Integer, primary_key=True)
-    question_id = db.Column(db.String(100), unique=True, nullable=False)
-    question_text = db.Column(db.Text, nullable=False)
-    from_user = db.Column(db.String(100))
-    item_id = db.Column(db.String(100))
-    is_answered = db.Column(db.Boolean, default=False)
-    answered_at = db.Column(db.DateTime)
-    created_at = db.Column(db.DateTime, default=get_local_time_utc)
-
-class ResponseRule(db.Model):
-    """Modelo para regras de resposta automática"""
-    id = db.Column(db.Integer, primary_key=True)
-    keywords = db.Column(db.Text, nullable=False)  # Palavras-chave separadas por vírgula
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    keywords = db.Column(db.Text, nullable=False)
     response_text = db.Column(db.Text, nullable=False)
     is_active = db.Column(db.Boolean, default=True)
-    priority = db.Column(db.Integer, default=1)
     created_at = db.Column(db.DateTime, default=get_local_time_utc)
+    updated_at = db.Column(db.DateTime, default=get_local_time_utc, onupdate=get_local_time_utc)
+
+class Question(db.Model):
+    """Perguntas recebidas do Mercado Livre"""
+    __tablename__ = 'questions'
+    id = db.Column(db.Integer, primary_key=True)
+    ml_question_id = db.Column(db.String(50), unique=True, nullable=False)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    item_id = db.Column(db.String(50), nullable=False)
+    question_text = db.Column(db.Text, nullable=False)
+    response_text = db.Column(db.Text)
+    is_answered = db.Column(db.Boolean, default=False)
+    answered_automatically = db.Column(db.Boolean, default=False)
+    created_at = db.Column(db.DateTime, default=get_local_time_utc)
+    answered_at = db.Column(db.DateTime)
 
 class AbsenceConfig(db.Model):
-    """Modelo para configuração de ausência"""
+    """Configurações de mensagens de ausência por horário"""
+    __tablename__ = 'absence_configs'
     id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
     name = db.Column(db.String(100), nullable=False)
+    message = db.Column(db.Text, nullable=False)
     start_time = db.Column(db.String(5), nullable=False)  # HH:MM
     end_time = db.Column(db.String(5), nullable=False)    # HH:MM
     days_of_week = db.Column(db.String(20), nullable=False)  # 0,1,2,3,4,5,6
-    message = db.Column(db.Text, nullable=False)
     is_active = db.Column(db.Boolean, default=True)
     created_at = db.Column(db.DateTime, default=get_local_time_utc)
 
 class ResponseHistory(db.Model):
-    """Modelo para histórico de respostas"""
+    """Histórico de respostas enviadas"""
+    __tablename__ = 'response_history'
     id = db.Column(db.Integer, primary_key=True)
-    question_id = db.Column(db.String(100), nullable=False)
-    question_text = db.Column(db.Text, nullable=False)
-    response_text = db.Column(db.Text, nullable=False)
-    response_type = db.Column(db.String(20), nullable=False)  # auto, manual, absence
-    rule_used = db.Column(db.String(200))
-    response_time = db.Column(db.Float)  # Tempo em segundos
-    from_user = db.Column(db.String(100))
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    question_id = db.Column(db.Integer, db.ForeignKey('questions.id'), nullable=False)
+    question_text = db.Column(db.Text)  # Texto da pergunta (para compatibilidade)
+    response_text = db.Column(db.Text)  # Texto da resposta (para compatibilidade)
+    response_type = db.Column(db.String(20), nullable=False)  # 'auto', 'absence', 'manual'
+    rule_used = db.Column(db.String(200))  # Regra utilizada (para compatibilidade)
+    keywords_matched = db.Column(db.String(200))
+    response_time = db.Column(db.Float)  # tempo em segundos para responder
+    from_user = db.Column(db.String(100))  # Usuário que fez a pergunta (para compatibilidade)
     created_at = db.Column(db.DateTime, default=get_local_time_utc)
 
+class TokenLog(db.Model):
+    """Logs de verificação de token"""
+    __tablename__ = 'token_logs'
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    token_status = db.Column(db.String(20), nullable=False)  # 'valid', 'expired', 'error'
+    error_message = db.Column(db.Text)
+    checked_at = db.Column(db.DateTime, default=get_local_time_utc)
+
+class WebhookLog(db.Model):
+    """Logs de webhooks recebidos"""
+    __tablename__ = 'webhook_logs'
+    id = db.Column(db.Integer, primary_key=True)
+    topic = db.Column(db.String(100))
+    resource = db.Column(db.String(200))
+    user_id_ml = db.Column(db.String(50))
+    application_id = db.Column(db.String(50))
+    attempts = db.Column(db.Integer, default=1)
+    sent = db.Column(db.DateTime)
+    received = db.Column(db.DateTime, default=get_local_time_utc)
+
+# ========== VARIÁVEIS GLOBAIS DE CONTROLE ==========
+_initialized = False
+_db_lock = threading.Lock()
+
+# ========== INICIALIZAÇÃO DO BANCO DE DADOS ==========
 def initialize_database():
-    """Inicializa o banco de dados"""
+    """Inicializa o banco de dados com dados padrão"""
+    global _initialized
+    
+    if _initialized:
+        return
+    
     try:
-        with app.app_context():
-            db.create_all()
-            add_debug_log("✅ Banco de dados inicializado")
+        with _db_lock:
+            with app.app_context():
+                add_debug_log("🔄 Inicializando banco de dados...")
+                
+                # Criar todas as tabelas
+                db.create_all()
+                add_debug_log("✅ Tabelas criadas com sucesso")
+                
+                # Criar usuário padrão
+                user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
+                if not user:
+                    user = User(
+                        ml_user_id=ML_USER_ID,
+                        access_token=ML_ACCESS_TOKEN,
+                        token_expires_at=get_local_time_utc() + timedelta(hours=6)
+                    )
+                    db.session.add(user)
+                    db.session.commit()
+                    add_debug_log(f"✅ Usuário padrão criado: {ML_USER_ID}")
+                else:
+                    # Atualizar token se necessário
+                    user.access_token = ML_ACCESS_TOKEN
+                    user.token_expires_at = get_local_time_utc() + timedelta(hours=6)
+                    user.updated_at = get_local_time_utc()
+                    db.session.commit()
+                    add_debug_log(f"✅ Usuário atualizado: {ML_USER_ID}")
+                
+                _initialized = True
+                add_debug_log(f"✅ Banco inicializado: {DATABASE_PATH}")
+                
     except Exception as e:
         add_debug_log(f"❌ Erro ao inicializar banco: {e}")
+        print(f"❌ Erro crítico na inicialização: {e}")
 
-# ========== LAYOUT MODERNO BASE ==========
-def get_modern_layout_base():
-    """Retorna o layout base moderno com Tailwind CSS"""
-    return """
-<!DOCTYPE html>
-<html lang="pt-BR" class="h-full bg-gray-50">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Bot ML - {title}</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-    <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
-    <script>
-        tailwind.config = {{
-            theme: {{
-                extend: {{
-                    fontFamily: {{
-                        'inter': ['Inter', 'sans-serif'],
-                    }},
-                    colors: {{
-                        primary: {{
-                            50: '#f0f9ff',
-                            500: '#0ea5e9',
-                            600: '#0284c7',
-                            700: '#0369a1',
-                            900: '#0c4a6e'
-                        }},
-                        accent: {{
-                            500: '#059669',
-                            600: '#047857'
-                        }}
-                    }}
-                }}
-            }}
-        }}
-    </script>
-    <style>
-        body {{ font-family: 'Inter', sans-serif; }}
-        .sidebar-shadow {{ box-shadow: 2px 0 10px rgba(0, 0, 0, 0.1); }}
-        .card-shadow {{ box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1), 0 1px 2px rgba(0, 0, 0, 0.06); }}
-        .card-shadow-hover {{ box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1), 0 2px 4px rgba(0, 0, 0, 0.06); }}
-    </style>
-</head>
-<body class="h-full font-inter">
-    <div class="flex h-screen bg-gray-50">
-        <!-- Sidebar -->
-        <div class="hidden md:flex md:w-64 md:flex-col">
-            <div class="flex flex-col flex-grow pt-5 overflow-y-auto bg-white sidebar-shadow">
-                <!-- Logo -->
-                <div class="flex items-center flex-shrink-0 px-6">
-                    <div class="flex items-center">
-                        <div class="w-8 h-8 bg-primary-600 rounded-lg flex items-center justify-center">
-                            <i data-lucide="bot" class="w-5 h-5 text-white"></i>
-                        </div>
-                        <span class="ml-3 text-xl font-semibold text-gray-900">Bot ML</span>
-                    </div>
-                </div>
+# ========== INICIALIZAÇÃO AUTOMÁTICA ==========
+add_debug_log("🚀 Iniciando sistema Bot ML...")
+add_debug_log(f"📁 Diretório de dados: {DATA_DIR}")
+add_debug_log(f"🗄️ Banco de dados: {DATABASE_PATH}")
+add_debug_log(f"🔑 Token: {ML_ACCESS_TOKEN[:20]}...")
+add_debug_log(f"👤 User ID: {ML_USER_ID}")
+
+print("🤖 Bot do Mercado Livre - Sistema Completo Funcional")
+print(f"📁 Dados: {DATA_DIR}")
+print(f"🔑 Token: {ML_ACCESS_TOKEN[:20]}...")
+print(f"👤 User: {ML_USER_ID}")
+
+
+# ========== SISTEMA DE AUSÊNCIA E REGRAS AUTOMÁTICAS ==========
+# Baseado no módulo modulo_ausencia_regras_sistema.py - 100% FUNCIONAL
+
+def is_absence_time():
+    """
+    Verifica se está em horário de ausência
+    Retorna: mensagem de ausência ou None
+    """
+    try:
+        now = get_local_time()
+        current_time = now.strftime("%H:%M")
+        current_weekday = str(now.weekday())  # 0=segunda, 6=domingo
+        
+        add_debug_log(f"🌙 Verificando ausência - Horário: {current_time}, Dia: {current_weekday}")
+        
+        absence_configs = AbsenceConfig.query.filter_by(is_active=True).all()
+        add_debug_log(f"   Configurações ativas: {len(absence_configs)}")
+        
+        for config in absence_configs:
+            if current_weekday in config.days_of_week.split(','):
+                start_time = config.start_time
+                end_time = config.end_time
                 
-                <!-- Navigation -->
-                <nav class="mt-8 flex-1 px-3 space-y-1">
-                    <a href="/" class="{nav_dashboard} group flex items-center px-3 py-2 text-sm font-medium rounded-lg">
-                        <i data-lucide="layout-dashboard" class="{icon_dashboard} mr-3 h-5 w-5"></i>
-                        Dashboard
-                    </a>
-                    <a href="/edit-rules" class="{nav_rules} group flex items-center px-3 py-2 text-sm font-medium rounded-lg">
-                        <i data-lucide="settings" class="{icon_rules} mr-3 h-5 w-5"></i>
-                        Regras
-                    </a>
-                    <a href="/history" class="{nav_history} group flex items-center px-3 py-2 text-sm font-medium rounded-lg">
-                        <i data-lucide="history" class="{icon_history} mr-3 h-5 w-5"></i>
-                        Histórico
-                    </a>
-                    <a href="/renovar-tokens" class="{nav_tokens} group flex items-center px-3 py-2 text-sm font-medium rounded-lg">
-                        <i data-lucide="key" class="{icon_tokens} mr-3 h-5 w-5"></i>
-                        Tokens
-                    </a>
-                    <a href="/debug-full" class="{nav_debug} group flex items-center px-3 py-2 text-sm font-medium rounded-lg">
-                        <i data-lucide="bug" class="{icon_debug} mr-3 h-5 w-5"></i>
-                        Debug
-                    </a>
-                    <a href="/edit-absence" class="{nav_absence} group flex items-center px-3 py-2 text-sm font-medium rounded-lg">
-                        <i data-lucide="moon" class="{icon_absence} mr-3 h-5 w-5"></i>
-                        Ausência
-                    </a>
-                </nav>
+                add_debug_log(f"   Testando: {config.name} ({start_time}-{end_time})")
                 
-                <!-- User Section -->
-                <div class="flex-shrink-0 p-4 border-t border-gray-200">
-                    <div class="flex items-center">
-                        <div class="w-8 h-8 bg-gray-300 rounded-full flex items-center justify-center">
-                            <i data-lucide="user" class="w-4 h-4 text-gray-600"></i>
-                        </div>
-                        <div class="ml-3">
-                            <p class="text-sm font-medium text-gray-700">Sistema Bot</p>
-                            <p class="text-xs text-gray-500">Versão 2.0</p>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
+                # Se start_time > end_time, significa que cruza meia-noite
+                if start_time > end_time:
+                    if current_time >= start_time or current_time <= end_time:
+                        add_debug_log(f"   ✅ AUSÊNCIA ATIVA: {config.name}")
+                        return config.message
+                else:
+                    if start_time <= current_time <= end_time:
+                        add_debug_log(f"   ✅ AUSÊNCIA ATIVA: {config.name}")
+                        return config.message
+        
+        add_debug_log("   ❌ Nenhuma configuração de ausência ativa")
+        return None
+        
+    except Exception as e:
+        add_debug_log(f"❌ Erro ao verificar ausência: {e}")
+        return None
 
-        <!-- Main Content -->
-        <div class="flex flex-col flex-1 overflow-hidden">
-            <!-- Header -->
-            <header class="bg-white shadow-sm border-b border-gray-200">
-                <div class="flex items-center justify-between px-6 py-4">
-                    <div class="flex items-center">
-                        <button class="md:hidden mr-3">
-                            <i data-lucide="menu" class="w-6 h-6 text-gray-600"></i>
-                        </button>
-                        <h1 class="text-2xl font-semibold text-gray-900">{page_title}</h1>
-                    </div>
-                    <div class="flex items-center space-x-4">
-                        {header_actions}
-                    </div>
-                </div>
-            </header>
+def find_auto_response(question_text):
+    """
+    Encontra resposta automática baseada em palavras-chave
+    Retorna: (response_text, keywords) ou (None, None)
+    """
+    try:
+        question_lower = question_text.lower()
+        add_debug_log(f"🔍 Buscando resposta para: '{question_text[:30]}...'")
+        
+        auto_responses = AutoResponse.query.filter_by(is_active=True).all()
+        add_debug_log(f"   Regras ativas: {len(auto_responses)}")
+        
+        for response in auto_responses:
+            keywords = [k.strip().lower() for k in response.keywords.split(',')]
+            
+            for keyword in keywords:
+                if keyword and keyword in question_lower:
+                    add_debug_log(f"   ✅ MATCH: '{keyword}' -> {response.response_text[:30]}...")
+                    return response.response_text, response.keywords
+        
+        add_debug_log("   ❌ Nenhuma palavra-chave encontrada")
+        return None, None
+        
+    except Exception as e:
+        add_debug_log(f"❌ Erro ao buscar resposta: {e}")
+        return None, None
 
-            <!-- Main Content Area -->
-            <main class="flex-1 overflow-y-auto p-6">
-                {content}
-            </main>
-        </div>
-    </div>
-
-    <script>
-        // Initialize Lucide icons
-        lucide.createIcons();
-        {custom_scripts}
-    </script>
-</body>
-</html>
-"""
-
-def get_navigation_classes(current_page):
-    """Retorna classes CSS para navegação baseada na página atual"""
-    nav_classes = {
-        'dashboard': {
-            'nav': 'bg-primary-50 border-r-2 border-primary-600 text-primary-700',
-            'icon': 'text-primary-500'
-        },
-        'rules': {
-            'nav': 'bg-primary-50 border-r-2 border-primary-600 text-primary-700',
-            'icon': 'text-primary-500'
-        },
-        'history': {
-            'nav': 'bg-primary-50 border-r-2 border-primary-600 text-primary-700',
-            'icon': 'text-primary-500'
-        },
-        'tokens': {
-            'nav': 'bg-primary-50 border-r-2 border-primary-600 text-primary-700',
-            'icon': 'text-primary-500'
-        },
-        'debug': {
-            'nav': 'bg-primary-50 border-r-2 border-primary-600 text-primary-700',
-            'icon': 'text-primary-500'
-        },
-        'absence': {
-            'nav': 'bg-primary-50 border-r-2 border-primary-600 text-primary-700',
-            'icon': 'text-primary-500'
-        }
+def answer_question_ml(question_id, answer_text):
+    """
+    Responde uma pergunta no Mercado Livre
+    Retorna: True se sucesso, False se erro
+    """
+    url = f"https://api.mercadolibre.com/answers"
+    
+    headers = {
+        "Authorization": f"Bearer {ML_ACCESS_TOKEN}",
+        "Content-Type": "application/json"
     }
     
-    default_nav = 'text-gray-700 hover:bg-gray-50'
-    default_icon = 'text-gray-400'
+    data = {
+        "question_id": int(question_id),
+        "text": answer_text
+    }
     
-    result = {}
-    for page in ['dashboard', 'rules', 'history', 'tokens', 'debug', 'absence']:
-        if page == current_page:
-            result[f'nav_{page}'] = nav_classes[page]['nav']
-            result[f'icon_{page}'] = nav_classes[page]['icon']
+    try:
+        add_debug_log(f"📤 Enviando resposta para pergunta {question_id}")
+        response = requests.post(url, headers=headers, json=data)
+        
+        if response.status_code == 200:
+            add_debug_log(f"✅ Resposta enviada com sucesso!")
+            return True
         else:
-            result[f'nav_{page}'] = default_nav
-            result[f'icon_{page}'] = default_icon
+            error_msg = f"Erro {response.status_code}: {response.text}"
+            add_debug_log(f"❌ Erro ao enviar resposta: {error_msg}")
+            return False
+            
+    except Exception as e:
+        add_debug_log(f"❌ Erro na requisição: {e}")
+        return False
+
+def fetch_unanswered_questions():
+    """
+    Busca perguntas não respondidas do Mercado Livre
+    Retorna: lista de perguntas
+    """
+    url = f"https://api.mercadolibre.com/my/received_questions/search"
     
-    return result
+    headers = {
+        "Authorization": f"Bearer {ML_ACCESS_TOKEN}"
+    }
+    
+    params = {
+        "status": "UNANSWERED",
+        "limit": 50
+    }
+    
+    try:
+        add_debug_log("📥 Buscando perguntas não respondidas...")
+        response = requests.get(url, headers=headers, params=params)
+        
+        if response.status_code == 200:
+            questions = response.json().get("questions", [])
+            add_debug_log(f"   Encontradas: {len(questions)} perguntas")
+            return questions
+        else:
+            add_debug_log(f"❌ Erro ao buscar perguntas: {response.status_code}")
+            return []
+            
+    except Exception as e:
+        add_debug_log(f"❌ Erro na requisição: {e}")
+        return []
 
-# ========== ROTAS COM LAYOUT MODERNO ==========
+def process_questions():
+    """
+    Processa perguntas automaticamente aplicando regras de ausência e palavras-chave
+    Esta é a função principal que integra todo o sistema
+    """
+    try:
+        add_debug_log("🔄 ========== PROCESSANDO PERGUNTAS ==========")
+        
+        with _db_lock:
+            with app.app_context():
+                questions = fetch_unanswered_questions()
+                
+                if not questions:
+                    add_debug_log("📭 Nenhuma pergunta nova")
+                    return
+                
+                user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
+                if not user:
+                    add_debug_log("❌ Usuário não encontrado")
+                    return
+                
+                for q in questions:
+                    question_id = str(q.get("id"))
+                    question_text = q.get("text", "")
+                    item_id = q.get("item_id", "")
+                    
+                    add_debug_log(f"📩 Pergunta #{question_id}: '{question_text[:50]}...'")
+                    
+                    # Verificar se já processamos esta pergunta
+                    existing = Question.query.filter_by(ml_question_id=question_id).first()
+                    if existing:
+                        add_debug_log(f"   ⏭️ Pergunta já processada")
+                        continue
+                    
+                    start_time = time.time()
+                    
+                    # Salvar pergunta no banco
+                    question = Question(
+                        ml_question_id=question_id,
+                        user_id=user.id,
+                        item_id=item_id,
+                        question_text=question_text,
+                        is_answered=False
+                    )
+                    db.session.add(question)
+                    db.session.flush()  # Para obter o ID
+                    
+                    response_type = None
+                    keywords_matched = None
+                    
+                    # 1. BUSCAR RESPOSTA AUTOMÁTICA POR PALAVRAS-CHAVE PRIMEIRO
+                    auto_response, matched_keywords = find_auto_response(question_text)
+                    if auto_response:
+                        if answer_question_ml(question_id, auto_response):
+                            question.response_text = auto_response
+                            question.is_answered = True
+                            question.answered_automatically = True
+                            question.answered_at = get_local_time_utc()
+                            response_type = "auto"
+                            keywords_matched = matched_keywords
+                            add_debug_log(f"✅ Respondida automaticamente")
+                    else:
+                        # 2. SE NÃO HOUVER REGRA, VERIFICAR HORÁRIO DE AUSÊNCIA
+                        absence_message = is_absence_time()
+                        if absence_message:
+                            if answer_question_ml(question_id, absence_message):
+                                question.response_text = absence_message
+                                question.is_answered = True
+                                question.answered_automatically = True
+                                question.answered_at = get_local_time_utc()
+                                response_type = "absence"
+                                add_debug_log(f"✅ Respondida com mensagem de ausência")
+                    
+                    # Salvar histórico de resposta
+                    if response_type:
+                        response_time = time.time() - start_time
+                        history = ResponseHistory(
+                            user_id=user.id,
+                            question_id=question.id,
+                            question_text=question_text,
+                            response_text=question.response_text,
+                            response_type=response_type,
+                            rule_used=matched_keywords,
+                            keywords_matched=keywords_matched,
+                            response_time=response_time,
+                            from_user=q.get("from", {}).get("user_id", "")
+                        )
+                        db.session.add(history)
+                    
+                    db.session.commit()
+                    
+                add_debug_log("✅ Processamento concluído")
+                
+    except Exception as e:
+        add_debug_log(f"❌ Erro ao processar perguntas: {e}")
+        import traceback
+        add_debug_log(f"   Traceback: {traceback.format_exc()}")
 
+# ========== DADOS PADRÃO PARA INICIALIZAÇÃO ==========
+def create_default_data():
+    """Cria dados padrão se não existirem"""
+    try:
+        with app.app_context():
+            user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
+            if not user:
+                return
+            
+            # Criar regras padrão se não existirem
+            if AutoResponse.query.filter_by(user_id=user.id).count() == 0:
+                default_rules = [
+                    {
+                        "keywords": "preço, valor, quanto custa",
+                        "response": "O preço está na descrição do produto. Qualquer dúvida, estamos à disposição!"
+                    },
+                    {
+                        "keywords": "entrega, prazo, demora",
+                        "response": "O prazo de entrega aparece na página do produto. Enviamos pelos Correios com código de rastreamento."
+                    },
+                    {
+                        "keywords": "frete, envio, correios",
+                        "response": "O frete é calculado automaticamente pelo Mercado Livre baseado no seu CEP. Enviamos pelos Correios."
+                    },
+                    {
+                        "keywords": "disponível, estoque, tem",
+                        "response": "Sim, temos em estoque! Pode fazer o pedido que enviamos no mesmo dia útil."
+                    },
+                    {
+                        "keywords": "garantia, defeito, problema",
+                        "response": "Todos os produtos têm garantia. Em caso de defeito, trocamos ou devolvemos o dinheiro."
+                    },
+                    {
+                        "keywords": "pagamento, cartão, pix",
+                        "response": "Aceitamos todas as formas de pagamento do Mercado Livre: cartão, PIX, boleto."
+                    },
+                    {
+                        "keywords": "nota, fiscal, nf, emite",
+                        "response": "Olá, seja bem-vindo à DETTECH, todos os produtos são com nota fiscal, pode ficar tranquilo!"
+                    }
+                ]
+                
+                for rule in default_rules:
+                    auto_response = AutoResponse(
+                        user_id=user.id,
+                        keywords=rule["keywords"],
+                        response_text=rule["response"],
+                        is_active=True
+                    )
+                    db.session.add(auto_response)
+                
+                db.session.commit()
+                add_debug_log(f"✅ {len(default_rules)} regras padrão criadas")
+            
+            # Criar configurações de ausência padrão se não existirem
+            if AbsenceConfig.query.filter_by(user_id=user.id).count() == 0:
+                absence_configs = [
+                    {
+                        "name": "Horário Comercial",
+                        "message": "Obrigado pela pergunta! Nosso horário de atendimento é das 8h às 18h, de segunda a sexta. Responderemos assim que possível!",
+                        "start_time": "18:00",
+                        "end_time": "08:00",
+                        "days_of_week": "0,1,2,3,4"  # Segunda a sexta
+                    },
+                    {
+                        "name": "Final de Semana",
+                        "message": "Obrigado pela pergunta! Não atendemos aos finais de semana, mas responderemos na segunda-feira. Bom final de semana!",
+                        "start_time": "00:00",
+                        "end_time": "23:59",
+                        "days_of_week": "5,6"  # Sábado e domingo
+                    }
+                ]
+                
+                for config in absence_configs:
+                    absence = AbsenceConfig(
+                        user_id=user.id,
+                        name=config["name"],
+                        message=config["message"],
+                        start_time=config["start_time"],
+                        end_time=config["end_time"],
+                        days_of_week=config["days_of_week"],
+                        is_active=True
+                    )
+                    db.session.add(absence)
+                
+                db.session.commit()
+                add_debug_log(f"✅ {len(absence_configs)} configurações de ausência criadas")
+                
+    except Exception as e:
+        add_debug_log(f"❌ Erro ao criar dados padrão: {e}")
+
+# ========== MONITORAMENTO CONTÍNUO ==========
+def monitor_questions():
+    """Função de monitoramento contínuo de perguntas"""
+    while True:
+        try:
+            if _initialized:
+                process_questions()
+            time.sleep(30)  # Verificar a cada 30 segundos
+        except Exception as e:
+            add_debug_log(f"❌ Erro no monitoramento: {e}")
+            time.sleep(30)
+
+
+# ========== SISTEMA DE RENOVAÇÃO MANUAL DE TOKENS ==========
+# Baseado no módulo modulo_renovacao_token_manual.py - 100% FUNCIONAL
+
+# Cache para evitar processamento duplicado de códigos
+processed_codes = set()
+
+def extract_code_from_input(input_str):
+    """
+    Extrai código de autorização de string ou URL
+    Corrige problema de URL completa sendo enviada como código
+    """
+    input_str = input_str.strip()
+    
+    # Se contém 'code=', extrair da URL
+    if 'code=' in input_str:
+        try:
+            import urllib.parse
+            if input_str.startswith('http'):
+                # É uma URL completa
+                parsed = urllib.parse.urlparse(input_str)
+                params = urllib.parse.parse_qs(parsed.query)
+                code = params.get('code', [input_str])[0]
+                add_debug_log(f"🔧 Código extraído da URL: {code}")
+                return code
+            else:
+                # Pode ser só o parâmetro code=...
+                if input_str.startswith('code='):
+                    return input_str.split('code=')[1].split('&')[0]
+        except Exception as e:
+            add_debug_log(f"⚠️ Erro ao extrair código da URL: {e}")
+    
+    # Retornar como está (já é um código limpo)
+    return input_str
+
+def generate_auth_url():
+    """Gera URL de autorização do Mercado Livre"""
+    redirect_uri = REDIRECT_URIS[0]  # Usar webhook como padrão
+    
+    url = (
+        f"https://auth.mercadolivre.com.br/authorization?"
+        f"response_type=code&"
+        f"client_id={ML_CLIENT_ID}&"
+        f"redirect_uri={redirect_uri}&"
+        f"scope=offline_access read write"
+    )
+    
+    add_debug_log(f"🔗 URL de autorização gerada: {redirect_uri}")
+    return url
+
+def process_auth_code_flexible(code):
+    """
+    Processa código de autorização tentando múltiplas URLs de redirect
+    Retorna: (success: bool, result: dict)
+    """
+    try:
+        # CORREÇÃO: Extrair código limpo da entrada
+        clean_code = extract_code_from_input(code)
+        add_debug_log(f"🔄 Processando código: {clean_code}")
+        
+        # CORREÇÃO: Verificar se código já foi processado
+        if clean_code in processed_codes:
+            add_debug_log(f"⚠️ Código já foi processado anteriormente: {clean_code}")
+            return False, {
+                'success': False,
+                'error': 'Código já processado',
+                'message': 'Este código de autorização já foi usado. Gere um novo código.'
+            }
+        
+        # Adicionar ao cache de códigos processados
+        processed_codes.add(clean_code)
+        
+        for i, redirect_uri in enumerate(REDIRECT_URIS):
+            try:
+                add_debug_log(f"🔄 Tentativa {i+1}/4 com redirect_uri: {redirect_uri}")
+                
+                url = "https://api.mercadolibre.com/oauth/token"
+                data = {
+                    'grant_type': 'authorization_code',
+                    'client_id': ML_CLIENT_ID,
+                    'client_secret': ML_CLIENT_SECRET,
+                    'code': clean_code,  # CORREÇÃO: Usar código limpo
+                    'redirect_uri': redirect_uri
+                }
+                
+                response = requests.post(url, data=data)
+                
+                if response.status_code == 200:
+                    token_data = response.json()
+                    
+                    # Buscar informações do usuário
+                    user_info = get_user_info(token_data['access_token'])
+                    
+                    result = {
+                        'success': True,
+                        'access_token': token_data['access_token'],
+                        'refresh_token': token_data.get('refresh_token', ''),
+                        'user_id': str(token_data['user_id']),
+                        'expires_in': token_data.get('expires_in', 21600),
+                        'user_info': user_info,
+                        'redirect_uri_used': redirect_uri
+                    }
+                    
+                    add_debug_log(f"✅ Sucesso com redirect_uri: {redirect_uri}")
+                    return True, result
+                    
+                else:
+                    error_msg = f"Erro {response.status_code}: {response.text}"
+                    add_debug_log(f"❌ Falha com redirect_uri {redirect_uri}: {error_msg}")
+                    
+            except Exception as e:
+                add_debug_log(f"❌ Erro com redirect_uri {redirect_uri}: {str(e)}")
+                continue
+        
+        # Remover do cache se todas as tentativas falharam
+        processed_codes.discard(clean_code)
+        
+        add_debug_log("❌ Todas as tentativas falharam")
+        return False, {
+            'success': False,
+            'error': 'Todas as tentativas falharam',
+            'message': 'Código inválido, expirado ou já foi usado'
+        }
+        
+    except Exception as e:
+        add_debug_log(f"❌ Erro ao processar código: {e}")
+        return False, {
+            'success': False,
+            'error': str(e),
+            'message': f'Erro ao processar código: {str(e)}'
+        }
+
+def get_user_info(access_token):
+    """Busca informações do usuário"""
+    try:
+        url = f"https://api.mercadolibre.com/users/me?access_token={access_token}"
+        response = requests.get(url)
+        
+        if response.status_code == 200:
+            return response.json()
+        else:
+            add_debug_log(f"❌ Erro ao buscar info do usuário: {response.status_code}")
+            return None
+            
+    except Exception as e:
+        add_debug_log(f"❌ Erro ao buscar info do usuário: {e}")
+        return None
+
+def update_system_tokens(access_token, refresh_token, user_id):
+    """
+    Atualiza tokens no sistema (variáveis globais e banco)
+    """
+    try:
+        add_debug_log("🔄 Atualizando tokens no sistema...")
+        
+        # Atualizar variáveis globais
+        global ML_ACCESS_TOKEN, ML_REFRESH_TOKEN, ML_USER_ID
+        ML_ACCESS_TOKEN = access_token
+        ML_REFRESH_TOKEN = refresh_token
+        ML_USER_ID = user_id
+        
+        # Atualizar no banco
+        with app.app_context():
+            user = User.query.filter_by(ml_user_id=user_id).first()
+            if not user:
+                user = User(ml_user_id=user_id)
+                db.session.add(user)
+            
+            user.access_token = access_token
+            user.refresh_token = refresh_token
+            user.token_expires_at = get_local_time_utc() + timedelta(hours=6)
+            user.updated_at = get_local_time_utc()
+            
+            db.session.commit()
+        
+        add_debug_log(f"✅ Sistema atualizado com novos tokens!")
+        add_debug_log(f"🔑 Access Token: {access_token[:20]}...")
+        add_debug_log(f"🔄 Refresh Token: {refresh_token[:20]}...")
+        add_debug_log(f"👤 User ID: {user_id}")
+        
+        return True, "Tokens atualizados com sucesso"
+        
+    except Exception as e:
+        error_msg = f"Erro ao atualizar tokens: {str(e)}"
+        add_debug_log(f"❌ {error_msg}")
+        return False, error_msg
+
+# ========== ROTAS FLASK PARA RENOVAÇÃO DE TOKENS ==========
+
+@app.route('/renovar-tokens')
+def renovar_tokens_page():
+    """Interface web para renovação manual de tokens"""
+    
+    auth_url = generate_auth_url()
+    
+    html = f"""
+    <!DOCTYPE html>
+    <html lang="pt-BR">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Renovar Tokens - Bot ML</title>
+        <style>
+            * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+            body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #f8f9fa; }}
+            .container {{ max-width: 800px; margin: 0 auto; padding: 20px; }}
+            .header {{ background: linear-gradient(135deg, #3483fa, #2968c8); color: white; padding: 30px; border-radius: 12px; margin-bottom: 30px; text-align: center; }}
+            .card {{ background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.08); margin-bottom: 20px; }}
+            .btn {{ display: inline-block; padding: 12px 24px; background: #3483fa; color: white; text-decoration: none; border-radius: 8px; font-weight: bold; margin: 10px 5px; }}
+            .btn:hover {{ background: #2968c8; }}
+            .btn-success {{ background: #28a745; }}
+            .btn-success:hover {{ background: #218838; }}
+            .btn-warning {{ background: #ffc107; color: #212529; }}
+            .btn-warning:hover {{ background: #e0a800; }}
+            .form-group {{ margin-bottom: 15px; }}
+            .form-group label {{ display: block; margin-bottom: 5px; font-weight: bold; }}
+            .form-group input {{ width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 5px; }}
+            .alert {{ padding: 15px; margin-bottom: 20px; border-radius: 5px; }}
+            .alert-info {{ background: #d1ecf1; color: #0c5460; border: 1px solid #bee5eb; }}
+            .alert-success {{ background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }}
+            .alert-error {{ background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }}
+            .step {{ background: #f8f9fa; padding: 15px; border-radius: 5px; margin-bottom: 15px; border-left: 4px solid #3483fa; }}
+            .code-input {{ font-family: monospace; }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="header">
+                <h1>🔄 Renovar Tokens do Mercado Livre</h1>
+                <p>Interface para renovação manual de tokens de acesso</p>
+            </div>
+            
+            <div class="card">
+                <h3>📋 Instruções</h3>
+                <div class="step">
+                    <strong>Passo 1:</strong> Clique no botão abaixo para abrir a autorização do Mercado Livre
+                </div>
+                <div class="step">
+                    <strong>Passo 2:</strong> Faça login na sua conta do Mercado Livre
+                </div>
+                <div class="step">
+                    <strong>Passo 3:</strong> Autorize o aplicativo
+                </div>
+                <div class="step">
+                    <strong>Passo 4:</strong> Copie o código da URL de retorno e cole abaixo
+                </div>
+                
+                <div style="text-align: center; margin: 20px 0;">
+                    <a href="{auth_url}" target="_blank" class="btn btn-success">
+                        🌐 Abrir Autorização do ML
+                    </a>
+                </div>
+            </div>
+            
+            <div class="card">
+                <h3>🔑 Processar Código de Autorização</h3>
+                <div class="alert alert-info">
+                    <strong>Formato esperado:</strong> TG-xxxxxxxxxxxxxxxxxxxxxxx-xxxxxxxxx
+                </div>
+                
+                <form id="token-form">
+                    <div class="form-group">
+                        <label for="auth-code">Código de Autorização:</label>
+                        <input type="text" id="auth-code" name="auth-code" class="code-input" 
+                               placeholder="TG-xxxxxxxxxxxxxxxxxxxxxxx-xxxxxxxxx" required>
+                    </div>
+                    <button type="submit" class="btn">🔄 Processar Código</button>
+                </form>
+                
+                <div id="result-container" style="margin-top: 20px;"></div>
+            </div>
+            
+            <div class="card">
+                <h3>🏠 Navegação</h3>
+                <a href="/" class="btn">← Voltar ao Dashboard</a>
+                <a href="/debug-full" class="btn btn-warning">🔍 Ver Logs</a>
+            </div>
+        </div>
+        
+        <script>
+            document.getElementById('token-form').addEventListener('submit', async function(e) {{
+                e.preventDefault();
+                
+                const code = document.getElementById('auth-code').value.trim();
+                const resultContainer = document.getElementById('result-container');
+                
+                if (!code) {{
+                    resultContainer.innerHTML = '<div class="alert alert-error">Por favor, insira o código de autorização.</div>';
+                    return;
+                }}
+                
+                resultContainer.innerHTML = '<div class="alert alert-info">🔄 Processando código...</div>';
+                
+                try {{
+                    const response = await fetch('/api/tokens/process-code-flexible', {{
+                        method: 'POST',
+                        headers: {{
+                            'Content-Type': 'application/json'
+                        }},
+                        body: JSON.stringify({{ code: code }})
+                    }});
+                    
+                    const result = await response.json();
+                    
+                    if (result.success) {{
+                        resultContainer.innerHTML = `
+                            <div class="alert alert-success">
+                                <h4>✅ Tokens atualizados com sucesso!</h4>
+                                <p><strong>Access Token:</strong> ${{result.access_token.substring(0, 20)}}...</p>
+                                <p><strong>User ID:</strong> ${{result.user_id}}</p>
+                                <p><strong>Expira em:</strong> ${{result.expires_in}} segundos</p>
+                                <p><strong>Redirect URI usado:</strong> ${{result.redirect_uri_used}}</p>
+                                ${{result.user_info ? `<p><strong>Email:</strong> ${{result.user_info.email}}</p>` : ''}}
+                            </div>
+                        `;
+                        
+                        // Limpar formulário
+                        document.getElementById('auth-code').value = '';
+                        
+                        // Redirecionar após 3 segundos
+                        setTimeout(() => {{
+                            window.location.href = '/';
+                        }}, 3000);
+                        
+                    }} else {{
+                        resultContainer.innerHTML = `
+                            <div class="alert alert-error">
+                                <h4>❌ Erro ao processar código</h4>
+                                <p><strong>Erro:</strong> ${{result.message}}</p>
+                                <p>Verifique se o código está correto e tente novamente.</p>
+                            </div>
+                        `;
+                    }}
+                    
+                }} catch (error) {{
+                    resultContainer.innerHTML = `
+                        <div class="alert alert-error">
+                            <h4>❌ Erro de conexão</h4>
+                            <p>Não foi possível processar o código. Tente novamente.</p>
+                        </div>
+                    `;
+                }}
+            }});
+        </script>
+    </body>
+    </html>
+    """
+    
+    return html
+
+@app.route('/api/tokens/process-code-flexible', methods=['POST'])
+def api_process_code_flexible():
+    """API para processar código de autorização com múltiplas tentativas"""
+    try:
+        data = request.get_json()
+        code = data.get('code', '').strip()
+        
+        if not code:
+            return jsonify({
+                'success': False,
+                'message': 'Código não fornecido'
+            }), 400
+        
+        # Processar código
+        success, result = process_auth_code_flexible(code)
+        
+        if success:
+            # Atualizar sistema com novos tokens
+            update_success, update_message = update_system_tokens(
+                result['access_token'],
+                result['refresh_token'],
+                result['user_id']
+            )
+            
+            if update_success:
+                return jsonify(result)
+            else:
+                return jsonify({
+                    'success': False,
+                    'message': f'Tokens obtidos mas erro ao atualizar sistema: {update_message}'
+                }), 500
+        else:
+            return jsonify(result), 400
+            
+    except Exception as e:
+        add_debug_log(f"❌ Erro na API de processamento: {e}")
+        return jsonify({
+            'success': False,
+            'message': f'Erro interno: {str(e)}'
+        }), 500
+
+@app.route('/api/ml/webhook', methods=['GET', 'POST'])
+def webhook_ml():
+    """Webhook para receber códigos de autorização e notificações do ML"""
+    try:
+        if request.method == 'GET':
+            # Verificar se há código de autorização na URL
+            code = request.args.get('code')
+            if code:
+                add_debug_log(f"🔗 Código recebido via webhook GET: {code}")
+                
+                # Processar código automaticamente
+                success, result = process_auth_code_flexible(code)
+                
+                if success:
+                    update_system_tokens(
+                        result['access_token'],
+                        result['refresh_token'],
+                        result['user_id']
+                    )
+                    
+                    return f"""
+                    <!DOCTYPE html>
+                    <html>
+                    <head><title>Autorização Concluída</title></head>
+                    <body>
+                        <h1>✅ Tokens Atualizados com Sucesso!</h1>
+                        <p><strong>User ID:</strong> {result['user_id']}</p>
+                        <p><strong>Token:</strong> {code}</p>
+                        <p>O sistema já está usando os novos tokens.</p>
+                        <p><a href="/">← Voltar ao Dashboard</a></p>
+                    </body>
+                    </html>
+                    """
+                else:
+                    return f"""
+                    <!DOCTYPE html>
+                    <html>
+                    <head><title>Erro na Autorização</title></head>
+                    <body>
+                        <h1>❌ Erro na Autorização</h1>
+                        <p>{result.get('message', 'Erro desconhecido')}</p>
+                        <p><a href="/renovar-tokens">← Tentar Novamente</a></p>
+                    </body>
+                    </html>
+                    """
+            else:
+                return jsonify({"message": "webhook funcionando!", "status": "webhook_active"})
+        
+        elif request.method == 'POST':
+            # Processar notificação do ML
+            data = request.get_json()
+            
+            if data and data.get('topic') == 'questions':
+                add_debug_log(f"📨 Notificação de pergunta recebida: {data}")
+                
+                # Salvar log do webhook
+                webhook_log = WebhookLog(
+                    topic=data.get('topic'),
+                    resource=data.get('resource'),
+                    user_id_ml=data.get('user_id'),
+                    application_id=data.get('application_id'),
+                    sent=datetime.fromisoformat(data.get('sent', '').replace('Z', '+00:00')) if data.get('sent') else None
+                )
+                db.session.add(webhook_log)
+                db.session.commit()
+                
+                # Processar perguntas imediatamente
+                threading.Thread(target=process_questions, daemon=True).start()
+                
+                return jsonify({"status": "ok", "message": "notificação processada"})
+            
+            return jsonify({"status": "ok", "message": "webhook recebido"})
+        
+    except Exception as e:
+        add_debug_log(f"❌ Erro no webhook: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+# ========== LAYOUT MINIMALISTA E SISTEMA DE HISTÓRICO ==========
+# Baseado nos módulos modulo_layout_minimalista.py e modulo_historico_respostas.py
+
+# CSS Base para todas as páginas
+BASE_CSS = """
+* { 
+    margin: 0; 
+    padding: 0; 
+    box-sizing: border-box; 
+}
+
+body { 
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+    background: #f8f9fa; 
+    line-height: 1.6;
+}
+
+.container { 
+    max-width: 1200px; 
+    margin: 0 auto; 
+    padding: 20px; 
+}
+
+/* Header principal */
+.header { 
+    background: linear-gradient(135deg, #3483fa, #2968c8); 
+    color: white; 
+    padding: 30px; 
+    border-radius: 12px; 
+    margin-bottom: 30px; 
+    text-align: center;
+}
+
+.header h1 { 
+    font-size: 2.5em; 
+    margin-bottom: 10px; 
+    font-weight: 600;
+}
+
+.header p { 
+    font-size: 1.2em; 
+    opacity: 0.9; 
+}
+
+/* Navegação */
+.nav { 
+    margin-bottom: 30px; 
+}
+
+.nav a { 
+    display: inline-block; 
+    padding: 12px 24px; 
+    background: #3483fa; 
+    color: white; 
+    text-decoration: none; 
+    border-radius: 8px; 
+    margin-right: 10px; 
+    margin-bottom: 10px;
+    font-weight: 500;
+    transition: all 0.3s ease;
+}
+
+.nav a:hover { 
+    background: #2968c8; 
+    transform: translateY(-1px);
+}
+
+.nav a.active { 
+    background: #28a745; 
+}
+
+/* Grid de estatísticas */
+.stats { 
+    display: grid; 
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); 
+    gap: 20px; 
+    margin-bottom: 30px; 
+}
+
+.stat-card { 
+    background: white; 
+    padding: 25px; 
+    border-radius: 12px; 
+    box-shadow: 0 4px 15px rgba(0,0,0,0.08); 
+    text-align: center;
+    transition: transform 0.3s ease;
+}
+
+.stat-card:hover {
+    transform: translateY(-2px);
+}
+
+.stat-number { 
+    font-size: 2.5em; 
+    font-weight: bold; 
+    color: #3483fa; 
+    margin-bottom: 10px;
+}
+
+.stat-label { 
+    color: #666; 
+    font-size: 1.1em;
+}
+
+/* Cards gerais */
+.card { 
+    background: white; 
+    padding: 25px; 
+    border-radius: 12px; 
+    box-shadow: 0 4px 15px rgba(0,0,0,0.08); 
+    margin-bottom: 20px; 
+}
+
+.card h3 { 
+    color: #333; 
+    margin-bottom: 20px; 
+    font-size: 1.4em;
+}
+
+/* Botões */
+.btn { 
+    display: inline-block; 
+    padding: 10px 20px; 
+    background: #3483fa; 
+    color: white; 
+    text-decoration: none; 
+    border-radius: 6px; 
+    border: none; 
+    cursor: pointer; 
+    font-size: 14px;
+    font-weight: 500;
+    transition: all 0.3s ease;
+}
+
+.btn:hover { 
+    background: #2968c8; 
+    transform: translateY(-1px);
+}
+
+.btn-success { 
+    background: #28a745; 
+}
+
+.btn-success:hover { 
+    background: #218838; 
+}
+
+.btn-warning { 
+    background: #ffc107; 
+    color: #212529; 
+}
+
+.btn-warning:hover { 
+    background: #e0a800; 
+}
+
+.btn-danger { 
+    background: #dc3545; 
+}
+
+.btn-danger:hover { 
+    background: #c82333; 
+}
+
+/* Tabelas */
+.table { 
+    width: 100%; 
+    border-collapse: collapse; 
+    margin-top: 20px;
+}
+
+.table th, .table td { 
+    padding: 12px; 
+    text-align: left; 
+    border-bottom: 1px solid #ddd; 
+}
+
+.table th { 
+    background: #f8f9fa; 
+    font-weight: 600;
+    color: #333;
+}
+
+.table tr:hover { 
+    background: #f8f9fa; 
+}
+
+/* Formulários */
+.form-group { 
+    margin-bottom: 20px; 
+}
+
+.form-group label { 
+    display: block; 
+    margin-bottom: 8px; 
+    font-weight: 600;
+    color: #333;
+}
+
+.form-group input, .form-group textarea, .form-group select { 
+    width: 100%; 
+    padding: 12px; 
+    border: 1px solid #ddd; 
+    border-radius: 6px; 
+    font-size: 14px;
+}
+
+.form-group input:focus, .form-group textarea:focus, .form-group select:focus { 
+    outline: none; 
+    border-color: #3483fa; 
+    box-shadow: 0 0 0 3px rgba(52, 131, 250, 0.1);
+}
+
+/* Alertas */
+.alert { 
+    padding: 15px; 
+    margin-bottom: 20px; 
+    border-radius: 6px; 
+    border: 1px solid transparent;
+}
+
+.alert-success { 
+    background: #d4edda; 
+    color: #155724; 
+    border-color: #c3e6cb; 
+}
+
+.alert-warning { 
+    background: #fff3cd; 
+    color: #856404; 
+    border-color: #ffeaa7; 
+}
+
+.alert-danger { 
+    background: #f8d7da; 
+    color: #721c24; 
+    border-color: #f5c6cb; 
+}
+
+.alert-info { 
+    background: #d1ecf1; 
+    color: #0c5460; 
+    border-color: #bee5eb; 
+}
+
+/* Responsividade */
+@media (max-width: 768px) {
+    .container { 
+        padding: 10px; 
+    }
+    
+    .header h1 { 
+        font-size: 2em; 
+    }
+    
+    .stats { 
+        grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); 
+        gap: 15px; 
+    }
+    
+    .stat-card { 
+        padding: 20px; 
+    }
+    
+    .stat-number { 
+        font-size: 2em; 
+    }
+    
+    .nav a { 
+        padding: 10px 16px; 
+        font-size: 14px; 
+    }
+    
+    .table { 
+        font-size: 12px; 
+    }
+    
+    .table th, .table td { 
+        padding: 8px; 
+    }
+}
+"""
+
+def create_base_template(title, content, current_page=""):
+    """Cria template base com layout minimalista"""
+    return f"""
+    <!DOCTYPE html>
+    <html lang="pt-BR">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>{title} - Bot ML</title>
+        <style>{BASE_CSS}</style>
+    </head>
+    <body>
+        <div class="container">
+            {content}
+        </div>
+    </body>
+    </html>
+    """
+
+def create_navigation(current_page=""):
+    """Cria navegação principal"""
+    nav_items = [
+        ("", "🏠 Dashboard"),
+        ("edit-rules", "✏️ Regras"),
+        ("edit-absence", "🌙 Ausência"),
+        ("history", "📊 Histórico"),
+        ("renovar-tokens", "🔄 Tokens"),
+        ("debug-full", "🔍 Debug")
+    ]
+    
+    nav_html = '<div class="nav">'
+    for page, label in nav_items:
+        active_class = ' active' if page == current_page else ''
+        href = f"/{page}" if page else "/"
+        nav_html += f'<a href="{href}" class="{active_class.strip()}">{label}</a>'
+    nav_html += '</div>'
+    
+    return nav_html
+
+def create_header(title, subtitle=""):
+    """Cria header principal"""
+    return f"""
+    <div class="header">
+        <h1>{title}</h1>
+        {f'<p>{subtitle}</p>' if subtitle else ''}
+    </div>
+    """
+
+def create_stat_card(number, label, color="#3483fa"):
+    """Cria card de estatística"""
+    return f"""
+    <div class="stat-card">
+        <div class="stat-number" style="color: {color}">{number}</div>
+        <div class="stat-label">{label}</div>
+    </div>
+    """
+
+# ========== DASHBOARD PRINCIPAL ==========
 @app.route('/')
 def dashboard():
-    """Dashboard principal com layout moderno"""
+    """Dashboard principal com estatísticas e status"""
     try:
         initialize_database()
         
@@ -459,7 +1695,16 @@ def dashboard():
                 ResponseHistory.response_type == 'auto'
             ).count()
             
-            # Status do token
+            absence_responses_today = ResponseHistory.query.filter(
+                ResponseHistory.created_at >= today_start_utc,
+                ResponseHistory.response_type == 'absence'
+            ).count()
+            
+            # Tempo médio de resposta
+            avg_response = db.session.query(db.func.avg(ResponseHistory.response_time)).scalar()
+            avg_response = round(avg_response, 2) if avg_response else 0
+            
+            # Status do token com renovação automática
             token_valid = True
             token_message = "Token válido"
             try:
@@ -473,7 +1718,7 @@ def dashboard():
                 token_valid = False
                 token_message = "Erro de conexão"
             
-            # Status da renovação automática
+            # Obter status da renovação automática com tratamento de erro
             try:
                 token_status_info = auto_refresh_manager.get_token_status()
             except Exception as e:
@@ -487,8 +1732,25 @@ def dashboard():
                     'is_refreshing': False
                 }
             
-            # Perguntas recentes não respondidas
-            recent_questions = Question.query.filter_by(is_answered=False).order_by(Question.created_at.desc()).limit(5).all()
+            current_time = get_local_time().strftime("%H:%M:%S")
+            
+            # Criar conteúdo do dashboard
+            content = create_header("🤖 Bot do Mercado Livre", f"Sistema ativo - {current_time}")
+            content += create_navigation("")
+            
+            # Status do token com renovação automática
+            token_color = "#28a745" if token_valid else "#dc3545"
+            token_status = "✅ Válido" if token_valid else "❌ Inválido"
+            
+            # Cores para status de renovação
+            status_colors = {
+                'active': '#28a745',
+                'expiring': '#ffc107', 
+                'expired': '#dc3545',
+                'unknown': '#6c757d'
+            }
+            
+            refresh_color = status_colors.get(token_status_info['status'], '#6c757d')
             
             # Formatação de tempo
             def format_time_remaining(seconds):
@@ -501,682 +1763,677 @@ def dashboard():
                 else:
                     return f"{minutes}min"
             
-            # Conteúdo do dashboard
-            content = f"""
-            <!-- Status Cards -->
-            <div class="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
-                <div class="bg-white rounded-xl p-6 card-shadow">
-                    <div class="flex items-center">
-                        <div class="w-12 h-12 bg-blue-100 rounded-lg flex items-center justify-center">
-                            <i data-lucide="message-circle" class="w-6 h-6 text-blue-600"></i>
+            content += f"""
+            <div class="card">
+                <h3>🔑 Status do Token e Renovação Automática</h3>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px;">
+                    <div>
+                        <h4>📊 Status Atual</h4>
+                        <p><strong>Status:</strong> <span style="color: {token_color}; font-weight: bold;">{token_status}</span></p>
+                        <p><strong>Token:</strong> {ML_ACCESS_TOKEN[:20]}...</p>
+                        <p><strong>User ID:</strong> {ML_USER_ID}</p>
+                        <p><strong>Conexão:</strong> {token_message}</p>
+                    </div>
+                    <div>
+                        <h4>🔄 Renovação Automática</h4>
+                        <p><strong>Status:</strong> <span style="color: {refresh_color}; font-weight: bold;">{token_status_info['message']}</span></p>
+                        <p><strong>Tempo restante:</strong> <span id="time-remaining" style="font-weight: bold; color: {refresh_color};">{format_time_remaining(token_status_info['time_remaining'])}</span></p>
+                        <p><strong>Próxima renovação:</strong> <span id="next-refresh" style="font-weight: bold;">{format_time_remaining(token_status_info['next_refresh'])}</span></p>
+                        <p><strong>Auto-renovação:</strong> <span style="color: {'#28a745' if token_status_info['auto_refresh_enabled'] else '#dc3545'}; font-weight: bold;">{'✅ Ativa' if token_status_info['auto_refresh_enabled'] else '❌ Inativa'}</span></p>
+                        {f'<p><strong>Status:</strong> <span style="color: #ffc107; font-weight: bold;">🔄 Renovando...</span></p>' if token_status_info['is_refreshing'] else ''}
+                    </div>
+                </div>
+                
+                <div style="background: #f8f9fa; padding: 15px; border-radius: 6px; margin-top: 15px;">
+                    <h4 style="margin-top: 0;">⏱️ Countdown em Tempo Real</h4>
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+                        <div style="text-align: center; padding: 15px; background: white; border-radius: 6px; border: 2px solid {refresh_color};">
+                            <h5 style="margin: 0; color: {refresh_color};">Token Expira Em</h5>
+                            <div id="token-countdown" style="font-size: 1.5em; font-weight: bold; color: {refresh_color}; margin-top: 10px;">
+                                {format_time_remaining(token_status_info['time_remaining'])}
+                            </div>
                         </div>
-                        <div class="ml-4">
-                            <p class="text-sm font-medium text-gray-600">Total de Perguntas</p>
-                            <p class="text-2xl font-bold text-gray-900">{total_questions}</p>
+                        <div style="text-align: center; padding: 15px; background: white; border-radius: 6px; border: 2px solid #3483fa;">
+                            <h5 style="margin: 0; color: #3483fa;">Renovação Em</h5>
+                            <div id="refresh-countdown" style="font-size: 1.5em; font-weight: bold; color: #3483fa; margin-top: 10px;">
+                                {format_time_remaining(token_status_info['next_refresh'])}
+                            </div>
                         </div>
                     </div>
                 </div>
-                <div class="bg-white rounded-xl p-6 card-shadow">
-                    <div class="flex items-center">
-                        <div class="w-12 h-12 bg-accent-100 rounded-lg flex items-center justify-center">
-                            <i data-lucide="check-circle" class="w-6 h-6 text-accent-600"></i>
-                        </div>
-                        <div class="ml-4">
-                            <p class="text-sm font-medium text-gray-600">Respondidas Hoje</p>
-                            <p class="text-2xl font-bold text-gray-900">{answered_today}</p>
-                        </div>
-                    </div>
-                </div>
-                <div class="bg-white rounded-xl p-6 card-shadow">
-                    <div class="flex items-center">
-                        <div class="w-12 h-12 bg-purple-100 rounded-lg flex items-center justify-center">
-                            <i data-lucide="zap" class="w-6 h-6 text-purple-600"></i>
-                        </div>
-                        <div class="ml-4">
-                            <p class="text-sm font-medium text-gray-600">Automáticas Hoje</p>
-                            <p class="text-2xl font-bold text-gray-900">{auto_responses_today}</p>
-                        </div>
-                    </div>
-                </div>
-                <div class="bg-white rounded-xl p-6 card-shadow">
-                    <div class="flex items-center">
-                        <div class="w-12 h-12 bg-{'accent' if token_valid else 'red'}-100 rounded-lg flex items-center justify-center">
-                            <i data-lucide="{'shield-check' if token_valid else 'shield-x'}" class="w-6 h-6 text-{'accent' if token_valid else 'red'}-600"></i>
-                        </div>
-                        <div class="ml-4">
-                            <p class="text-sm font-medium text-gray-600">Status do Token</p>
-                            <p class="text-lg font-bold text-{'accent' if token_valid else 'red'}-600">{'Válido' if token_valid else 'Inválido'}</p>
-                        </div>
-                    </div>
+                
+                <div style="margin-top: 15px; text-align: center;">
+                    <button onclick="toggleAutoRefresh()" class="btn {'btn-danger' if token_status_info['auto_refresh_enabled'] else 'btn-success'}" style="margin-right: 10px;">
+                        {'🛑 Desabilitar Auto-renovação' if token_status_info['auto_refresh_enabled'] else '🚀 Habilitar Auto-renovação'}
+                    </button>
+                    <button onclick="forceRefresh()" class="btn btn-warning" style="margin-right: 10px;">
+                        🔄 Forçar Renovação Agora
+                    </button>
+                    <a href="/renovar-tokens" class="btn">🔧 Renovação Manual</a>
                 </div>
             </div>
-
-            <!-- Token Status and Auto Refresh -->
-            <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
-                <!-- Current Token Status -->
-                <div class="bg-white rounded-xl p-6 card-shadow">
-                    <div class="flex items-center justify-between mb-4">
-                        <h2 class="text-lg font-semibold text-gray-900">Status Atual do Token</h2>
-                        <div class="flex items-center">
-                            <div class="w-3 h-3 bg-{'accent' if token_valid else 'red'}-500 rounded-full mr-2"></div>
-                            <span class="text-sm font-medium text-{'accent' if token_valid else 'red'}-600">{'Válido' if token_valid else 'Inválido'}</span>
-                        </div>
-                    </div>
+            
+            <script>
+                // Atualizar countdown a cada segundo
+                let tokenTimeRemaining = {token_status_info['time_remaining']};
+                let refreshTimeRemaining = {token_status_info['next_refresh']};
+                
+                function formatTime(seconds) {{
+                    if (seconds <= 0) return "Expirado";
+                    const hours = Math.floor(seconds / 3600);
+                    const minutes = Math.floor((seconds % 3600) / 60);
+                    const secs = seconds % 60;
                     
-                    <div class="space-y-4">
-                        <div class="flex justify-between items-center">
-                            <span class="text-sm text-gray-600">Access Token</span>
-                            <span class="text-sm font-mono text-gray-900">{ML_ACCESS_TOKEN[:20]}...</span>
-                        </div>
-                        <div class="flex justify-between items-center">
-                            <span class="text-sm text-gray-600">User ID</span>
-                            <span class="text-sm font-mono text-gray-900">{ML_USER_ID}</span>
-                        </div>
-                        <div class="flex justify-between items-center">
-                            <span class="text-sm text-gray-600">Status</span>
-                            <span class="text-sm text-gray-900">{token_message}</span>
-                        </div>
-                        <div class="flex justify-between items-center">
-                            <span class="text-sm text-gray-600">Expira em</span>
-                            <span id="tokenExpiry" class="text-sm font-medium text-gray-900">{format_time_remaining(token_status_info['time_remaining'])}</span>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Auto Refresh Status -->
-                <div class="bg-white rounded-xl p-6 card-shadow">
-                    <div class="flex items-center justify-between mb-4">
-                        <h2 class="text-lg font-semibold text-gray-900">Renovação Automática</h2>
-                        <div class="flex items-center">
-                            <div class="w-3 h-3 bg-{'blue' if token_status_info['auto_refresh_enabled'] else 'gray'}-500 rounded-full mr-2"></div>
-                            <span class="text-sm font-medium text-{'blue' if token_status_info['auto_refresh_enabled'] else 'gray'}-600">{'Ativa' if token_status_info['auto_refresh_enabled'] else 'Inativa'}</span>
-                        </div>
-                    </div>
-                    
-                    <div class="space-y-4">
-                        <div class="flex justify-between items-center">
-                            <span class="text-sm text-gray-600">Próxima renovação</span>
-                            <span id="nextRefresh" class="text-sm font-medium text-gray-900">{format_time_remaining(token_status_info['next_refresh'])}</span>
-                        </div>
-                        <div class="flex justify-between items-center">
-                            <span class="text-sm text-gray-600">Status do sistema</span>
-                            <span class="text-sm text-gray-900">{token_status_info['message']}</span>
-                        </div>
-                        <div class="flex justify-between items-center">
-                            <span class="text-sm text-gray-600">Auto-renovação</span>
-                            <button onclick="toggleAutoRefresh()" class="text-sm px-3 py-1 rounded-full {'bg-red-100 text-red-700 hover:bg-red-200' if token_status_info['auto_refresh_enabled'] else 'bg-accent-100 text-accent-700 hover:bg-accent-200'}">
-                                {'Pausar' if token_status_info['auto_refresh_enabled'] else 'Ativar'}
-                            </button>
-                        </div>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Recent Questions -->
-            <div class="bg-white rounded-xl card-shadow">
-                <div class="px-6 py-4 border-b border-gray-200">
-                    <div class="flex items-center justify-between">
-                        <h2 class="text-lg font-semibold text-gray-900">Perguntas Recentes Não Respondidas</h2>
-                        <a href="/history" class="text-sm text-primary-600 hover:text-primary-700 font-medium">Ver todas</a>
-                    </div>
-                </div>
-                
-                <div class="p-6">
-                    <div class="space-y-4">
-                        {chr(10).join([
-                        f'<div class="flex items-start space-x-4 p-4 bg-gray-50 rounded-lg">' +
-                        f'<div class="w-10 h-10 bg-blue-100 rounded-full flex items-center justify-center">' +
-                        f'<i data-lucide="message-circle" class="w-5 h-5 text-blue-600"></i>' +
-                        f'</div>' +
-                        f'<div class="flex-1 min-w-0">' +
-                        f'<p class="text-sm font-medium text-gray-900 truncate">{q.question_text}</p>' +
-                        f'<p class="text-xs text-gray-500">Por: {q.from_user or "Usuário"} - {format_local_time(q.created_at).strftime("%d/%m/%Y %H:%M") if q.created_at else "Data não disponível"}</p>' +
-                        f'</div>' +
-                        f'<div class="flex-shrink-0">' +
-                        f'<span class="inline-flex px-2 py-1 text-xs font-semibold rounded-full bg-yellow-100 text-yellow-800">' +
-                        f'Pendente' +
-                        f'</span>' +
-                        f'</div>' +
-                        f'</div>'
-                        for q in recent_questions]) if recent_questions else '<div class="text-center py-8"><div class="flex flex-col items-center"><i data-lucide="inbox" class="w-12 h-12 text-gray-400 mb-4"></i><h3 class="text-lg font-medium text-gray-900 mb-2">Nenhuma pergunta pendente</h3><p class="text-gray-500">Todas as perguntas foram respondidas.</p></div></div>'}
-                    </div>
-                </div>
-            </div>
-            """
-            
-            custom_scripts = f"""
-            // Countdown timer
-            let tokenTimeRemaining = {token_status_info['time_remaining']};
-            let refreshTimeRemaining = {token_status_info['next_refresh']};
-            
-            function formatTime(seconds) {{
-                if (seconds <= 0) return "Expirado";
-                const hours = Math.floor(seconds / 3600);
-                const minutes = Math.floor((seconds % 3600) / 60);
-                
-                if (hours > 0) {{
-                    return `${{hours}}h ${{minutes}}min`;
-                }} else {{
-                    return `${{minutes}}min`;
-                }}
-            }}
-            
-            function updateCountdowns() {{
-                const tokenElement = document.getElementById('tokenExpiry');
-                const refreshElement = document.getElementById('nextRefresh');
-                
-                if (tokenElement) {{
-                    tokenElement.textContent = formatTime(Math.max(0, tokenTimeRemaining));
-                }}
-                
-                if (refreshElement) {{
-                    refreshElement.textContent = formatTime(Math.max(0, refreshTimeRemaining));
-                }}
-                
-                tokenTimeRemaining = Math.max(0, tokenTimeRemaining - 1);
-                refreshTimeRemaining = Math.max(0, refreshTimeRemaining - 1);
-            }}
-            
-            // Atualizar a cada segundo
-            setInterval(updateCountdowns, 1000);
-            
-            // Recarregar página a cada 5 minutos
-            setTimeout(() => {{
-                window.location.reload();
-            }}, 300000);
-            
-            async function toggleAutoRefresh() {{
-                try {{
-                    const response = await fetch('/api/tokens/toggle-auto-refresh', {{
-                        method: 'POST'
-                    }});
-                    const result = await response.json();
-                    if (result.success) {{
-                        window.location.reload();
+                    if (hours > 0) {{
+                        return `${{hours}}h ${{minutes}}min ${{secs}}s`;
+                    }} else if (minutes > 0) {{
+                        return `${{minutes}}min ${{secs}}s`;
                     }} else {{
-                        alert('Erro: ' + result.message);
+                        return `${{secs}}s`;
                     }}
-                }} catch (error) {{
-                    alert('Erro ao alterar auto-renovação');
                 }}
-            }}
+                
+                function updateCountdowns() {{
+                    const tokenElement = document.getElementById('token-countdown');
+                    const refreshElement = document.getElementById('refresh-countdown');
+                    
+                    if (tokenElement) {{
+                        tokenElement.textContent = formatTime(Math.max(0, tokenTimeRemaining));
+                        if (tokenTimeRemaining <= 0) {{
+                            tokenElement.style.color = '#dc3545';
+                            tokenElement.parentElement.style.borderColor = '#dc3545';
+                        }} else if (tokenTimeRemaining <= 3600) {{
+                            tokenElement.style.color = '#ffc107';
+                            tokenElement.parentElement.style.borderColor = '#ffc107';
+                        }}
+                    }}
+                    
+                    if (refreshElement) {{
+                        refreshElement.textContent = formatTime(Math.max(0, refreshTimeRemaining));
+                    }}
+                    
+                    tokenTimeRemaining = Math.max(0, tokenTimeRemaining - 1);
+                    refreshTimeRemaining = Math.max(0, refreshTimeRemaining - 1);
+                }}
+                
+                // Atualizar a cada segundo
+                setInterval(updateCountdowns, 1000);
+                
+                // Recarregar página a cada 5 minutos para atualizar dados
+                setTimeout(() => {{
+                    window.location.reload();
+                }}, 300000);
+                
+                async function toggleAutoRefresh() {{
+                    try {{
+                        const response = await fetch('/api/tokens/toggle-auto-refresh', {{
+                            method: 'POST'
+                        }});
+                        const result = await response.json();
+                        if (result.success) {{
+                            window.location.reload();
+                        }} else {{
+                            alert('Erro: ' + result.message);
+                        }}
+                    }} catch (error) {{
+                        alert('Erro ao alterar auto-renovação');
+                    }}
+                }}
+                
+                async function forceRefresh() {{
+                    if (confirm('Deseja forçar a renovação do token agora?')) {{
+                        try {{
+                            const response = await fetch('/api/tokens/force-refresh', {{
+                                method: 'POST'
+                            }});
+                            const result = await response.json();
+                            if (result.success) {{
+                                alert('Token renovado com sucesso!');
+                                window.location.reload();
+                            }} else {{
+                                alert('Erro na renovação: ' + result.message);
+                            }}
+                        }} catch (error) {{
+                            alert('Erro ao forçar renovação');
+                        }}
+                    }}
+                }}
+            </script>
             """
             
-            # Aplicar layout moderno
-            nav_classes = get_navigation_classes('dashboard')
-            layout = get_modern_layout_base()
+            # Estatísticas
+            content += '<div class="stats">'
+            content += create_stat_card(total_questions, "Total de Perguntas")
+            content += create_stat_card(answered_today, "Respondidas Hoje")
+            content += create_stat_card(auto_responses_today, "Respostas Automáticas", "#28a745" if auto_responses_today > 0 else "#dc3545")
+            content += create_stat_card(absence_responses_today, "Respostas Ausência", "#ffc107")
+            content += create_stat_card(f"{avg_response}s", "Tempo Médio")
+            content += '</div>'
             
-            return layout.format(
-                title="Dashboard",
-                page_title="Dashboard Principal",
-                content=content,
-                header_actions='<div class="text-sm text-gray-500">Sistema ativo</div>',
-                custom_scripts=custom_scripts,
-                **nav_classes
-            )
+            # Últimas perguntas
+            recent_questions = Question.query.order_by(Question.created_at.desc()).limit(5).all()
+            
+            content += """
+            <div class="card">
+                <h3>📩 Últimas Perguntas</h3>
+                <table class="table">
+                    <thead>
+                        <tr>
+                            <th>Pergunta</th>
+                            <th>Status</th>
+                            <th>Data</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+            """
+            
+            for q in recent_questions:
+                status = "✅ Respondida" if q.is_answered else "⏳ Pendente"
+                status_color = "#28a745" if q.is_answered else "#ffc107"
+                local_time = format_local_time(q.created_at)
+                time_str = local_time.strftime("%d/%m %H:%M") if local_time else "N/A"
+                
+                content += f"""
+                <tr>
+                    <td>{q.question_text[:50]}...</td>
+                    <td style="color: {status_color}; font-weight: bold;">{status}</td>
+                    <td>{time_str}</td>
+                </tr>
+                """
+            
+            content += """
+                    </tbody>
+                </table>
+            </div>
+            """
+            
+            return create_base_template("Dashboard", content)
             
     except Exception as e:
         add_debug_log(f"❌ Erro no dashboard: {e}")
-        return f"<h1>Erro no Dashboard</h1><p>{e}</p>", 500
+        error_content = create_header("❌ Erro no Sistema")
+        error_content += f"""
+        <div class="card">
+            <div class="alert alert-danger">
+                <h4>Erro no Dashboard</h4>
+                <p>Erro: {e}</p>
+                <p>O sistema está inicializando, tente novamente em alguns segundos.</p>
+            </div>
+            <a href="/" class="btn">🔄 Recarregar</a>
+        </div>
+        """
+        return create_base_template("Erro", error_content)
 
-
-@app.route('/edit-rules')
-def edit_rules_page():
-    """Página para editar regras de resposta automática com layout moderno"""
+# ========== PÁGINA DE HISTÓRICO ==========
+@app.route('/history')
+def history_page():
+    """Página de histórico de respostas"""
     try:
         with app.app_context():
-            initialize_database()
-            rules = ResponseRule.query.all()
+            # Buscar histórico com joins - CORRIGIDO
+            history_query = db.session.query(
+                ResponseHistory,
+                Question,
+                User
+            ).select_from(ResponseHistory).join(Question).join(User).order_by(ResponseHistory.created_at.desc()).limit(100)
             
-            content = f"""
-            <!-- Add New Rule Form -->
-            <div class="bg-white rounded-xl p-6 card-shadow mb-6">
-                <div class="flex items-center mb-6">
-                    <div class="w-10 h-10 bg-accent-100 rounded-lg flex items-center justify-center mr-4">
-                        <i data-lucide="plus" class="w-5 h-5 text-accent-600"></i>
-                    </div>
-                    <h2 class="text-xl font-semibold text-gray-900">Adicionar Nova Regra</h2>
-                </div>
+            history_records = history_query.all()
+            
+            # Estatísticas do histórico
+            total_responses = ResponseHistory.query.count()
+            auto_count = ResponseHistory.query.filter_by(response_type='auto').count()
+            absence_count = ResponseHistory.query.filter_by(response_type='absence').count()
+            manual_count = ResponseHistory.query.filter_by(response_type='manual').count()
+            
+            avg_time = db.session.query(db.func.avg(ResponseHistory.response_time)).scalar()
+            avg_time = round(avg_time, 2) if avg_time else 0
+            
+            content = create_header("📊 Histórico de Respostas", "Análise detalhada das respostas enviadas")
+            content += create_navigation("history")
+            
+            # Estatísticas do histórico
+            content += '<div class="stats">'
+            content += create_stat_card(total_responses, "Total de Respostas")
+            content += create_stat_card(auto_count, "Automáticas", "#28a745")
+            content += create_stat_card(absence_count, "Ausência", "#ffc107")
+            content += create_stat_card(manual_count, "Manuais", "#6c757d")
+            content += create_stat_card(f"{avg_time}s", "Tempo Médio")
+            content += '</div>'
+            
+            # Tabela de histórico
+            content += """
+            <div class="card">
+                <h3>📋 Últimas 100 Respostas</h3>
+                <table class="table">
+                    <thead>
+                        <tr>
+                            <th>Data/Hora</th>
+                            <th>Pergunta</th>
+                            <th>Tipo</th>
+                            <th>Palavras-chave</th>
+                            <th>Tempo</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+            """
+            
+            for history, question, user in history_records:
+                local_time = format_local_time(history.created_at)
+                time_str = local_time.strftime("%d/%m %H:%M") if local_time else "N/A"
                 
-                <form id="rule-form" class="space-y-6">
-                    <div>
-                        <label for="keywords" class="block text-sm font-medium text-gray-700 mb-2">
-                            Palavras-chave (separadas por vírgula)
-                        </label>
-                        <input type="text" id="keywords" name="keywords" 
-                               class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500"
-                               placeholder="preço, valor, quanto custa" required>
-                        <p class="mt-1 text-sm text-gray-500">Digite as palavras que ativarão esta resposta automática</p>
-                    </div>
-                    
-                    <div>
-                        <label for="response" class="block text-sm font-medium text-gray-700 mb-2">
-                            Resposta automática
-                        </label>
-                        <textarea id="response" name="response" rows="4"
-                                  class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500"
-                                  placeholder="Digite a resposta que será enviada automaticamente..." required></textarea>
-                    </div>
-                    
-                    <div class="flex justify-end">
-                        <button type="submit" class="px-6 py-2 bg-accent-600 text-white rounded-lg hover:bg-accent-700 focus:ring-2 focus:ring-accent-500 focus:ring-offset-2 flex items-center">
-                            <i data-lucide="save" class="w-4 h-4 mr-2"></i>
-                            Salvar Regra
-                        </button>
-                    </div>
-                </form>
-            </div>
-
-            <!-- Existing Rules -->
-            <div class="bg-white rounded-xl card-shadow">
-                <div class="px-6 py-4 border-b border-gray-200">
-                    <div class="flex items-center justify-between">
-                        <h2 class="text-xl font-semibold text-gray-900">Regras Existentes</h2>
-                        <span class="text-sm text-gray-500">{len(rules)} regra{'s' if len(rules) != 1 else ''}</span>
-                    </div>
-                </div>
+                type_colors = {
+                    'auto': '#28a745',
+                    'absence': '#ffc107',
+                    'manual': '#6c757d'
+                }
                 
-                <div class="overflow-x-auto">
-                    <table class="min-w-full divide-y divide-gray-200">
-                        <thead class="bg-gray-50">
-                            <tr>
-                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                                    Palavras-chave
-                                </th>
-                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                                    Resposta
-                                </th>
-                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                                    Status
-                                </th>
-                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                                    Ações
-                                </th>
-                            </tr>
-                        </thead>
-                        <tbody class="bg-white divide-y divide-gray-200">
-                            {chr(10).join([f'''
-                            <tr class="hover:bg-gray-50">
-                                <td class="px-6 py-4 whitespace-nowrap">
-                                    <div class="flex flex-wrap gap-1">
-                                        {chr(10).join([f'<span class="inline-flex px-2 py-1 text-xs font-medium bg-blue-100 text-blue-800 rounded-full">{keyword.strip()}</span>' for keyword in rule.keywords.split(',')])}
-                                    </div>
-                                </td>
-                                <td class="px-6 py-4">
-                                    <div class="text-sm text-gray-900 max-w-xs truncate" title="{rule.response_text}">
-                                        {rule.response_text[:80]}{'...' if len(rule.response_text) > 80 else ''}
-                                    </div>
-                                </td>
-                                <td class="px-6 py-4 whitespace-nowrap">
-                                    <span class="inline-flex px-2 py-1 text-xs font-semibold rounded-full {'bg-accent-100 text-accent-800' if rule.is_active else 'bg-red-100 text-red-800'}">
-                                        {'Ativa' if rule.is_active else 'Inativa'}
-                                    </span>
-                                </td>
-                                <td class="px-6 py-4 whitespace-nowrap text-sm font-medium space-x-2">
-                                    <button onclick="toggleRule({rule.id})" 
-                                            class="{'text-red-600 hover:text-red-900' if rule.is_active else 'text-accent-600 hover:text-accent-900'}">
-                                        {'Desativar' if rule.is_active else 'Ativar'}
-                                    </button>
-                                    <button onclick="deleteRule({rule.id})" 
-                                            class="text-red-600 hover:text-red-900">
-                                        Excluir
-                                    </button>
-                                </td>
-                            </tr>
-                            ''' for rule in rules]) if rules else '''
-                            <tr>
-                                <td colspan="4" class="px-6 py-12 text-center">
-                                    <div class="flex flex-col items-center">
-                                        <i data-lucide="inbox" class="w-12 h-12 text-gray-400 mb-4"></i>
-                                        <h3 class="text-lg font-medium text-gray-900 mb-2">Nenhuma regra configurada</h3>
-                                        <p class="text-gray-500">Crie sua primeira regra de resposta automática acima.</p>
-                                    </div>
-                                </td>
-                            </tr>
-                            '''}
-                        </tbody>
-                    </table>
-                </div>
+                type_labels = {
+                    'auto': '🤖 Automática',
+                    'absence': '🌙 Ausência',
+                    'manual': '👤 Manual'
+                }
+                
+                type_color = type_colors.get(history.response_type, '#6c757d')
+                type_label = type_labels.get(history.response_type, history.response_type)
+                
+                keywords = history.keywords_matched or "-"
+                response_time = f"{history.response_time:.2f}s" if history.response_time else "-"
+                
+                content += f"""
+                <tr>
+                    <td>{time_str}</td>
+                    <td>{question.question_text[:40]}...</td>
+                    <td style="color: {type_color}; font-weight: bold;">{type_label}</td>
+                    <td>{keywords}</td>
+                    <td>{response_time}</td>
+                </tr>
+                """
+            
+            content += """
+                    </tbody>
+                </table>
             </div>
             """
             
-            custom_scripts = """
-            document.getElementById('rule-form').addEventListener('submit', async function(e) {
-                e.preventDefault();
+            return create_base_template("Histórico", content)
+            
+    except Exception as e:
+        add_debug_log(f"❌ Erro na página de histórico: {e}")
+        error_content = create_header("❌ Erro no Histórico")
+        error_content += create_navigation("history")
+        error_content += f"""
+        <div class="card">
+            <div class="alert alert-danger">
+                <h4>Erro ao carregar histórico</h4>
+                <p>Erro: {e}</p>
+            </div>
+            <a href="/" class="btn">← Voltar ao Dashboard</a>
+        </div>
+        """
+        return create_base_template("Erro", error_content)
+
+
+# ========== SISTEMA DE DEBUG E PÁGINAS DE EDIÇÃO ==========
+
+@app.route('/debug-full')
+def debug_full():
+    """Página com todos os logs de debug"""
+    all_logs = get_debug_logs()
+    current_time = get_local_time().strftime("%H:%M:%S")
+    
+    content = create_header("🔍 Debug Completo", f"Logs detalhados do sistema - {current_time}")
+    content += create_navigation("debug-full")
+    
+    content += f"""
+    <div class="card">
+        <h3>📋 Todos os Logs de Debug</h3>
+        <p><strong>Total de logs:</strong> {len(all_logs)}</p>
+        <button class="btn btn-warning" onclick="clearLogs()">🗑️ Limpar Logs</button>
+        <button class="btn" onclick="refreshPage()">🔄 Atualizar</button>
+        
+        <div style="background: #000; color: #0f0; padding: 15px; border-radius: 4px; font-family: monospace; font-size: 12px; max-height: 600px; overflow-y: auto; margin-top: 20px;">
+    """
+    
+    for log in all_logs:
+        content += f'<div style="margin-bottom: 2px;">{log}</div>'
+    
+    content += """
+        </div>
+    </div>
+    
+    <script>
+        function clearLogs() {
+            fetch('/api/debug/clear-logs', {method: 'POST'})
+            .then(() => window.location.reload());
+        }
+        function refreshPage() { window.location.reload(); }
+        setInterval(refreshPage, 15000); // Atualizar a cada 15 segundos
+    </script>
+    """
+    
+    return create_base_template("Debug Completo", content)
+
+@app.route('/api/debug/clear-logs', methods=['POST'])
+def api_clear_logs():
+    """API para limpar logs de debug"""
+    clear_debug_logs()
+    return jsonify({"message": "Logs limpos com sucesso"})
+
+@app.route('/api/debug/logs')
+def api_get_logs():
+    """API para obter logs de debug"""
+    limit = request.args.get('limit', type=int)
+    logs = get_debug_logs(limit)
+    return jsonify({"logs": logs, "total": len(DEBUG_LOGS)})
+
+# ========== PÁGINA DE EDIÇÃO DE REGRAS ==========
+@app.route('/edit-rules')
+def edit_rules_page():
+    """Página para editar regras de resposta automática"""
+    try:
+        with app.app_context():
+            user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
+            if not user:
+                return redirect('/')
+            
+            rules = AutoResponse.query.filter_by(user_id=user.id).all()
+            
+            content = create_header("✏️ Editar Regras", "Gerenciar respostas automáticas por palavras-chave")
+            content += create_navigation("edit-rules")
+            
+            # Formulário para nova regra
+            content += """
+            <div class="card">
+                <h3>➕ Adicionar Nova Regra</h3>
+                <form id="rule-form">
+                    <div class="form-group">
+                        <label for="keywords">Palavras-chave (separadas por vírgula):</label>
+                        <input type="text" id="keywords" name="keywords" placeholder="preço, valor, quanto custa" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="response">Resposta automática:</label>
+                        <textarea id="response" name="response" rows="3" placeholder="Digite a resposta que será enviada..." required></textarea>
+                    </div>
+                    <button type="submit" class="btn btn-success">💾 Salvar Regra</button>
+                </form>
+            </div>
+            """
+            
+            # Lista de regras existentes
+            content += """
+            <div class="card">
+                <h3>📋 Regras Existentes</h3>
+                <table class="table">
+                    <thead>
+                        <tr>
+                            <th>Palavras-chave</th>
+                            <th>Resposta</th>
+                            <th>Status</th>
+                            <th>Ações</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+            """
+            
+            for rule in rules:
+                status_color = "#28a745" if rule.is_active else "#dc3545"
+                status_text = "✅ Ativa" if rule.is_active else "❌ Inativa"
                 
-                const keywords = document.getElementById('keywords').value;
-                const response = document.getElementById('response').value;
-                
-                try {
-                    const result = await fetch('/api/rules', {
-                        method: 'POST',
-                        headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({keywords: keywords, response: response})
-                    });
+                content += f"""
+                <tr>
+                    <td>{rule.keywords}</td>
+                    <td>{rule.response_text[:50]}...</td>
+                    <td style="color: {status_color}; font-weight: bold;">{status_text}</td>
+                    <td>
+                        <button class="btn btn-warning" onclick="toggleRule({rule.id})">
+                            {'🔴 Desativar' if rule.is_active else '🟢 Ativar'}
+                        </button>
+                        <button class="btn btn-danger" onclick="deleteRule({rule.id})">🗑️ Excluir</button>
+                    </td>
+                </tr>
+                """
+            
+            content += """
+                    </tbody>
+                </table>
+            </div>
+            
+            <script>
+                document.getElementById('rule-form').addEventListener('submit', async function(e) {
+                    e.preventDefault();
                     
-                    if (result.ok) {
-                        alert('Regra salva com sucesso!');
-                        window.location.reload();
-                    } else {
-                        alert('Erro ao salvar regra');
-                    }
-                } catch (error) {
-                    alert('Erro de conexão');
-                }
-            });
-            
-            async function toggleRule(id) {
-                try {
-                    const result = await fetch(`/api/rules/${id}/toggle`, {method: 'POST'});
-                    if (result.ok) {
-                        window.location.reload();
-                    } else {
-                        alert('Erro ao alterar status');
-                    }
-                } catch (error) {
-                    alert('Erro de conexão');
-                }
-            }
-            
-            async function deleteRule(id) {
-                if (confirm('Tem certeza que deseja excluir esta regra?')) {
+                    const keywords = document.getElementById('keywords').value;
+                    const response = document.getElementById('response').value;
+                    
                     try {
-                        const result = await fetch(`/api/rules/${id}`, {method: 'DELETE'});
+                        const result = await fetch('/api/rules', {
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify({keywords: keywords, response: response})
+                        });
+                        
+                        if (result.ok) {
+                            alert('Regra salva com sucesso!');
+                            window.location.reload();
+                        } else {
+                            alert('Erro ao salvar regra');
+                        }
+                    } catch (error) {
+                        alert('Erro de conexão');
+                    }
+                });
+                
+                async function toggleRule(id) {
+                    try {
+                        const result = await fetch(`/api/rules/${id}/toggle`, {method: 'POST'});
                         if (result.ok) {
                             window.location.reload();
                         } else {
-                            alert('Erro ao excluir regra');
+                            alert('Erro ao alterar status');
                         }
                     } catch (error) {
                         alert('Erro de conexão');
                     }
                 }
-            }
+                
+                async function deleteRule(id) {
+                    if (confirm('Tem certeza que deseja excluir esta regra?')) {
+                        try {
+                            const result = await fetch(`/api/rules/${id}`, {method: 'DELETE'});
+                            if (result.ok) {
+                                window.location.reload();
+                            } else {
+                                alert('Erro ao excluir regra');
+                            }
+                        } catch (error) {
+                            alert('Erro de conexão');
+                        }
+                    }
+                }
+            </script>
             """
             
-            nav_classes = get_navigation_classes('rules')
-            layout = get_modern_layout_base()
-            
-            return layout.format(
-                title="Regras de Resposta",
-                page_title="Gerenciar Regras de Resposta",
-                content=content,
-                header_actions='<button class="px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700">Nova Regra</button>',
-                custom_scripts=custom_scripts,
-                **nav_classes
-            )
+            return create_base_template("Editar Regras", content)
             
     except Exception as e:
         add_debug_log(f"❌ Erro na página de regras: {e}")
-        return f"<h1>Erro na página de regras</h1><p>{e}</p>", 500
+        return redirect('/')
 
+# ========== PÁGINA DE EDIÇÃO DE AUSÊNCIA ==========
 @app.route('/edit-absence')
 def edit_absence_page():
-    """Página para editar configurações de ausência com layout moderno"""
+    """Página para editar configurações de ausência"""
     try:
         with app.app_context():
-            initialize_database()
-            configs = AbsenceConfig.query.all()
+            user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
+            if not user:
+                return redirect('/')
             
-            content = f"""
-            <!-- Add New Absence Config Form -->
-            <div class="bg-white rounded-xl p-6 card-shadow mb-6">
-                <div class="flex items-center mb-6">
-                    <div class="w-10 h-10 bg-purple-100 rounded-lg flex items-center justify-center mr-4">
-                        <i data-lucide="plus" class="w-5 h-5 text-purple-600"></i>
+            configs = AbsenceConfig.query.filter_by(user_id=user.id).all()
+            
+            content = create_header("🌙 Configurar Ausência", "Gerenciar mensagens automáticas por horário")
+            content += create_navigation("edit-absence")
+            
+            # Formulário para nova configuração
+            content += """
+            <div class="card">
+                <h3>➕ Adicionar Configuração de Ausência</h3>
+                <form id="absence-form">
+                    <div class="form-group">
+                        <label for="name">Nome da configuração:</label>
+                        <input type="text" id="name" name="name" placeholder="Ex: Horário Comercial" required>
                     </div>
-                    <h2 class="text-xl font-semibold text-gray-900">Adicionar Configuração de Ausência</h2>
-                </div>
-                
-                <form id="absence-form" class="space-y-6">
-                    <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-                        <div>
-                            <label for="name" class="block text-sm font-medium text-gray-700 mb-2">
-                                Nome da configuração
-                            </label>
-                            <input type="text" id="name" name="name" 
-                                   class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500"
-                                   placeholder="Ex: Horário Comercial" required>
-                        </div>
-                        
-                        <div>
-                            <label for="message" class="block text-sm font-medium text-gray-700 mb-2">
-                                Mensagem de ausência
-                            </label>
-                            <textarea id="message" name="message" rows="3"
-                                      class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500"
-                                      placeholder="Digite a mensagem que será enviada..." required></textarea>
-                        </div>
+                    <div class="form-group">
+                        <label for="message">Mensagem de ausência:</label>
+                        <textarea id="message" name="message" rows="3" placeholder="Digite a mensagem que será enviada..." required></textarea>
                     </div>
-                    
-                    <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-                        <div>
-                            <label for="start_time" class="block text-sm font-medium text-gray-700 mb-2">
-                                Horário de início
-                            </label>
-                            <input type="time" id="start_time" name="start_time" 
-                                   class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500" required>
-                        </div>
-                        
-                        <div>
-                            <label for="end_time" class="block text-sm font-medium text-gray-700 mb-2">
-                                Horário de fim
-                            </label>
-                            <input type="time" id="end_time" name="end_time" 
-                                   class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500" required>
+                    <div class="form-group">
+                        <label for="start_time">Horário de início:</label>
+                        <input type="time" id="start_time" name="start_time" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="end_time">Horário de fim:</label>
+                        <input type="time" id="end_time" name="end_time" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="days">Dias da semana:</label>
+                        <div style="display: flex; flex-wrap: wrap; gap: 10px;">
+                            <label><input type="checkbox" name="days" value="0"> Segunda</label>
+                            <label><input type="checkbox" name="days" value="1"> Terça</label>
+                            <label><input type="checkbox" name="days" value="2"> Quarta</label>
+                            <label><input type="checkbox" name="days" value="3"> Quinta</label>
+                            <label><input type="checkbox" name="days" value="4"> Sexta</label>
+                            <label><input type="checkbox" name="days" value="5"> Sábado</label>
+                            <label><input type="checkbox" name="days" value="6"> Domingo</label>
                         </div>
                     </div>
-                    
-                    <div>
-                        <label class="block text-sm font-medium text-gray-700 mb-3">
-                            Dias da semana
-                        </label>
-                        <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3">
-                            <label class="flex items-center p-3 border border-gray-300 rounded-lg hover:bg-gray-50 cursor-pointer">
-                                <input type="checkbox" name="days" value="0" class="mr-2 text-primary-600 focus:ring-primary-500">
-                                <span class="text-sm">Segunda</span>
-                            </label>
-                            <label class="flex items-center p-3 border border-gray-300 rounded-lg hover:bg-gray-50 cursor-pointer">
-                                <input type="checkbox" name="days" value="1" class="mr-2 text-primary-600 focus:ring-primary-500">
-                                <span class="text-sm">Terça</span>
-                            </label>
-                            <label class="flex items-center p-3 border border-gray-300 rounded-lg hover:bg-gray-50 cursor-pointer">
-                                <input type="checkbox" name="days" value="2" class="mr-2 text-primary-600 focus:ring-primary-500">
-                                <span class="text-sm">Quarta</span>
-                            </label>
-                            <label class="flex items-center p-3 border border-gray-300 rounded-lg hover:bg-gray-50 cursor-pointer">
-                                <input type="checkbox" name="days" value="3" class="mr-2 text-primary-600 focus:ring-primary-500">
-                                <span class="text-sm">Quinta</span>
-                            </label>
-                            <label class="flex items-center p-3 border border-gray-300 rounded-lg hover:bg-gray-50 cursor-pointer">
-                                <input type="checkbox" name="days" value="4" class="mr-2 text-primary-600 focus:ring-primary-500">
-                                <span class="text-sm">Sexta</span>
-                            </label>
-                            <label class="flex items-center p-3 border border-gray-300 rounded-lg hover:bg-gray-50 cursor-pointer">
-                                <input type="checkbox" name="days" value="5" class="mr-2 text-primary-600 focus:ring-primary-500">
-                                <span class="text-sm">Sábado</span>
-                            </label>
-                            <label class="flex items-center p-3 border border-gray-300 rounded-lg hover:bg-gray-50 cursor-pointer">
-                                <input type="checkbox" name="days" value="6" class="mr-2 text-primary-600 focus:ring-primary-500">
-                                <span class="text-sm">Domingo</span>
-                            </label>
-                        </div>
-                    </div>
-                    
-                    <div class="flex justify-end">
-                        <button type="submit" class="px-6 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 focus:ring-2 focus:ring-purple-500 focus:ring-offset-2 flex items-center">
-                            <i data-lucide="save" class="w-4 h-4 mr-2"></i>
-                            Salvar Configuração
-                        </button>
-                    </div>
+                    <button type="submit" class="btn btn-success">💾 Salvar Configuração</button>
                 </form>
-            </div>
-
-            <!-- Existing Absence Configs -->
-            <div class="bg-white rounded-xl card-shadow">
-                <div class="px-6 py-4 border-b border-gray-200">
-                    <div class="flex items-center justify-between">
-                        <h2 class="text-xl font-semibold text-gray-900">Configurações Existentes</h2>
-                        <span class="text-sm text-gray-500">{len(configs)} configuração{'ões' if len(configs) != 1 else ''}</span>
-                    </div>
-                </div>
-                
-                <div class="overflow-x-auto">
-                    <table class="min-w-full divide-y divide-gray-200">
-                        <thead class="bg-gray-50">
-                            <tr>
-                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                                    Nome
-                                </th>
-                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                                    Horário
-                                </th>
-                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                                    Dias
-                                </th>
-                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                                    Status
-                                </th>
-                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                                    Ações
-                                </th>
-                            </tr>
-                        </thead>
-                        <tbody class="bg-white divide-y divide-gray-200">
-                            {chr(10).join([f'''
-                            <tr class="hover:bg-gray-50">
-                                <td class="px-6 py-4 whitespace-nowrap">
-                                    <div class="text-sm font-medium text-gray-900">{config.name}</div>
-                                    <div class="text-sm text-gray-500 max-w-xs truncate" title="{config.message}">
-                                        {config.message[:50]}{'...' if len(config.message) > 50 else ''}
-                                    </div>
-                                </td>
-                                <td class="px-6 py-4 whitespace-nowrap">
-                                    <div class="text-sm text-gray-900">{config.start_time} - {config.end_time}</div>
-                                </td>
-                                <td class="px-6 py-4 whitespace-nowrap">
-                                    <div class="flex flex-wrap gap-1">
-                                        {chr(10).join([f'<span class="inline-flex px-2 py-1 text-xs font-medium bg-gray-100 text-gray-800 rounded-full">{["Seg", "Ter", "Qua", "Qui", "Sex", "Sáb", "Dom"][int(d)]}</span>' for d in config.days_of_week.split(',') if d.isdigit() and int(d) < 7])}
-                                    </div>
-                                </td>
-                                <td class="px-6 py-4 whitespace-nowrap">
-                                    <span class="inline-flex px-2 py-1 text-xs font-semibold rounded-full {'bg-accent-100 text-accent-800' if config.is_active else 'bg-red-100 text-red-800'}">
-                                        {'Ativa' if config.is_active else 'Inativa'}
-                                    </span>
-                                </td>
-                                <td class="px-6 py-4 whitespace-nowrap text-sm font-medium space-x-2">
-                                    <button onclick="toggleAbsence({config.id})" 
-                                            class="{'text-red-600 hover:text-red-900' if config.is_active else 'text-accent-600 hover:text-accent-900'}">
-                                        {'Desativar' if config.is_active else 'Ativar'}
-                                    </button>
-                                    <button onclick="deleteAbsence({config.id})" 
-                                            class="text-red-600 hover:text-red-900">
-                                        Excluir
-                                    </button>
-                                </td>
-                            </tr>
-                            ''' for config in configs]) if configs else '''
-                            <tr>
-                                <td colspan="5" class="px-6 py-12 text-center">
-                                    <div class="flex flex-col items-center">
-                                        <i data-lucide="moon" class="w-12 h-12 text-gray-400 mb-4"></i>
-                                        <h3 class="text-lg font-medium text-gray-900 mb-2">Nenhuma configuração de ausência</h3>
-                                        <p class="text-gray-500">Crie sua primeira configuração de ausência acima.</p>
-                                    </div>
-                                </td>
-                            </tr>
-                            '''}
-                        </tbody>
-                    </table>
-                </div>
             </div>
             """
             
-            custom_scripts = """
-            document.getElementById('absence-form').addEventListener('submit', async function(e) {
-                e.preventDefault();
+            # Lista de configurações existentes
+            content += """
+            <div class="card">
+                <h3>📋 Configurações Existentes</h3>
+                <table class="table">
+                    <thead>
+                        <tr>
+                            <th>Nome</th>
+                            <th>Horário</th>
+                            <th>Dias</th>
+                            <th>Status</th>
+                            <th>Ações</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+            """
+            
+            days_names = ["Seg", "Ter", "Qua", "Qui", "Sex", "Sáb", "Dom"]
+            
+            for config in configs:
+                status_color = "#28a745" if config.is_active else "#dc3545"
+                status_text = "✅ Ativa" if config.is_active else "❌ Inativa"
                 
-                const name = document.getElementById('name').value;
-                const message = document.getElementById('message').value;
-                const start_time = document.getElementById('start_time').value;
-                const end_time = document.getElementById('end_time').value;
+                days_list = [days_names[int(d)] for d in config.days_of_week.split(',') if d.isdigit() and int(d) < 7]
+                days_str = ", ".join(days_list)
                 
-                const selectedDays = Array.from(document.querySelectorAll('input[name="days"]:checked'))
-                    .map(cb => cb.value);
-                
-                if (selectedDays.length === 0) {
-                    alert('Selecione pelo menos um dia da semana');
-                    return;
-                }
-                
-                try {
-                    const result = await fetch('/api/absence', {
-                        method: 'POST',
-                        headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({
-                            name: name,
-                            message: message,
-                            start_time: start_time,
-                            end_time: end_time,
-                            days_of_week: selectedDays.join(',')
-                        })
-                    });
+                content += f"""
+                <tr>
+                    <td>{config.name}</td>
+                    <td>{config.start_time} - {config.end_time}</td>
+                    <td>{days_str}</td>
+                    <td style="color: {status_color}; font-weight: bold;">{status_text}</td>
+                    <td>
+                        <button class="btn btn-warning" onclick="toggleAbsence({config.id})">
+                            {'🔴 Desativar' if config.is_active else '🟢 Ativar'}
+                        </button>
+                        <button class="btn btn-danger" onclick="deleteAbsence({config.id})">🗑️ Excluir</button>
+                    </td>
+                </tr>
+                """
+            
+            content += """
+                    </tbody>
+                </table>
+            </div>
+            
+            <script>
+                document.getElementById('absence-form').addEventListener('submit', async function(e) {
+                    e.preventDefault();
                     
-                    if (result.ok) {
-                        alert('Configuração salva com sucesso!');
-                        window.location.reload();
-                    } else {
-                        alert('Erro ao salvar configuração');
+                    const name = document.getElementById('name').value;
+                    const message = document.getElementById('message').value;
+                    const start_time = document.getElementById('start_time').value;
+                    const end_time = document.getElementById('end_time').value;
+                    
+                    const selectedDays = Array.from(document.querySelectorAll('input[name="days"]:checked'))
+                        .map(cb => cb.value);
+                    
+                    if (selectedDays.length === 0) {
+                        alert('Selecione pelo menos um dia da semana');
+                        return;
                     }
-                } catch (error) {
-                    alert('Erro de conexão');
-                }
-            });
-            
-            async function toggleAbsence(id) {
-                try {
-                    const result = await fetch(`/api/absence/${id}/toggle`, {method: 'POST'});
-                    if (result.ok) {
-                        window.location.reload();
-                    } else {
-                        alert('Erro ao alterar status');
-                    }
-                } catch (error) {
-                    alert('Erro de conexão');
-                }
-            }
-            
-            async function deleteAbsence(id) {
-                if (confirm('Tem certeza que deseja excluir esta configuração?')) {
+                    
                     try {
-                        const result = await fetch(`/api/absence/${id}`, {method: 'DELETE'});
+                        const result = await fetch('/api/absence', {
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify({
+                                name: name,
+                                message: message,
+                                start_time: start_time,
+                                end_time: end_time,
+                                days_of_week: selectedDays.join(',')
+                            })
+                        });
+                        
+                        if (result.ok) {
+                            alert('Configuração salva com sucesso!');
+                            window.location.reload();
+                        } else {
+                            alert('Erro ao salvar configuração');
+                        }
+                    } catch (error) {
+                        alert('Erro de conexão');
+                    }
+                });
+                
+                async function toggleAbsence(id) {
+                    try {
+                        const result = await fetch(`/api/absence/${id}/toggle`, {method: 'POST'});
                         if (result.ok) {
                             window.location.reload();
                         } else {
-                            alert('Erro ao excluir configuração');
+                            alert('Erro ao alterar status');
                         }
                     } catch (error) {
                         alert('Erro de conexão');
                     }
                 }
-            }
+                
+                async function deleteAbsence(id) {
+                    if (confirm('Tem certeza que deseja excluir esta configuração?')) {
+                        try {
+                            const result = await fetch(`/api/absence/${id}`, {method: 'DELETE'});
+                            if (result.ok) {
+                                window.location.reload();
+                            } else {
+                                alert('Erro ao excluir configuração');
+                            }
+                        } catch (error) {
+                            alert('Erro de conexão');
+                        }
+                    }
+                }
+            </script>
             """
             
-            nav_classes = get_navigation_classes('absence')
-            layout = get_modern_layout_base()
-            
-            return layout.format(
-                title="Configurações de Ausência",
-                page_title="Gerenciar Ausência",
-                content=content,
-                header_actions='<button class="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700">Nova Configuração</button>',
-                custom_scripts=custom_scripts,
-                **nav_classes
-            )
+            return create_base_template("Configurar Ausência", content)
             
     except Exception as e:
         add_debug_log(f"❌ Erro na página de ausência: {e}")
-        return f"<h1>Erro na página de ausência</h1><p>{e}</p>", 500
+        return redirect('/')
 
 # ========== APIs PARA GERENCIAMENTO ==========
 
@@ -1187,7 +2444,12 @@ def api_create_rule():
         data = request.get_json()
         
         with app.app_context():
-            rule = ResponseRule(
+            user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
+            if not user:
+                return jsonify({"error": "Usuário não encontrado"}), 404
+            
+            rule = AutoResponse(
+                user_id=user.id,
                 keywords=data['keywords'],
                 response_text=data['response'],
                 is_active=True
@@ -1208,11 +2470,12 @@ def api_toggle_rule(rule_id):
     """API para ativar/desativar regra"""
     try:
         with app.app_context():
-            rule = ResponseRule.query.get(rule_id)
+            rule = AutoResponse.query.get(rule_id)
             if not rule:
                 return jsonify({"error": "Regra não encontrada"}), 404
             
             rule.is_active = not rule.is_active
+            rule.updated_at = get_local_time_utc()
             db.session.commit()
             
             status = "ativada" if rule.is_active else "desativada"
@@ -1228,7 +2491,7 @@ def api_delete_rule(rule_id):
     """API para excluir regra"""
     try:
         with app.app_context():
-            rule = ResponseRule.query.get(rule_id)
+            rule = AutoResponse.query.get(rule_id)
             if not rule:
                 return jsonify({"error": "Regra não encontrada"}), 404
             
@@ -1249,7 +2512,12 @@ def api_create_absence():
         data = request.get_json()
         
         with app.app_context():
+            user = User.query.filter_by(ml_user_id=ML_USER_ID).first()
+            if not user:
+                return jsonify({"error": "Usuário não encontrado"}), 404
+            
             config = AbsenceConfig(
+                user_id=user.id,
                 name=data['name'],
                 message=data['message'],
                 start_time=data['start_time'],
@@ -1261,11 +2529,11 @@ def api_create_absence():
             db.session.add(config)
             db.session.commit()
             
-            add_debug_log(f"✅ Nova configuração de ausência criada: {data['name']}")
+            add_debug_log(f"✅ Nova configuração de ausência: {data['name']}")
             return jsonify({"message": "Configuração criada com sucesso"})
             
     except Exception as e:
-        add_debug_log(f"❌ Erro ao criar configuração de ausência: {e}")
+        add_debug_log(f"❌ Erro ao criar configuração: {e}")
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/absence/<int:config_id>/toggle', methods=['POST'])
@@ -1281,11 +2549,11 @@ def api_toggle_absence(config_id):
             db.session.commit()
             
             status = "ativada" if config.is_active else "desativada"
-            add_debug_log(f"🔄 Configuração de ausência {config_id} {status}")
+            add_debug_log(f"🔄 Configuração {config_id} {status}")
             return jsonify({"message": f"Configuração {status} com sucesso"})
             
     except Exception as e:
-        add_debug_log(f"❌ Erro ao alterar configuração de ausência: {e}")
+        add_debug_log(f"❌ Erro ao alterar configuração: {e}")
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/absence/<int:config_id>', methods=['DELETE'])
@@ -1300,271 +2568,32 @@ def api_delete_absence(config_id):
             db.session.delete(config)
             db.session.commit()
             
-            add_debug_log(f"🗑️ Configuração de ausência {config_id} excluída")
+            add_debug_log(f"🗑️ Configuração {config_id} excluída")
             return jsonify({"message": "Configuração excluída com sucesso"})
             
     except Exception as e:
-        add_debug_log(f"❌ Erro ao excluir configuração de ausência: {e}")
+        add_debug_log(f"❌ Erro ao excluir configuração: {e}")
         return jsonify({"error": str(e)}), 500
 
+# ========== APIs DE CONTROLE DE RENOVAÇÃO AUTOMÁTICA ==========
 
-@app.route('/history')
-def history_page():
-    """Página de histórico de respostas com layout moderno"""
+@app.route('/api/tokens/status', methods=['GET'])
+def api_token_status():
+    """API para obter status detalhado do token e renovação automática"""
     try:
-        with app.app_context():
-            initialize_database()
-            
-            # Buscar histórico
-            history_records = ResponseHistory.query.order_by(ResponseHistory.created_at.desc()).limit(100).all()
-            
-            # Estatísticas do histórico
-            total_responses = ResponseHistory.query.count()
-            auto_count = ResponseHistory.query.filter_by(response_type='auto').count()
-            absence_count = ResponseHistory.query.filter_by(response_type='absence').count()
-            manual_count = ResponseHistory.query.filter_by(response_type='manual').count()
-            
-            avg_time = db.session.query(db.func.avg(ResponseHistory.response_time)).scalar()
-            avg_time = round(avg_time, 2) if avg_time else 0
-            
-            content = f"""
-            <!-- Statistics Cards -->
-            <div class="grid grid-cols-1 md:grid-cols-5 gap-6 mb-8">
-                <div class="bg-white rounded-xl p-6 card-shadow">
-                    <div class="flex items-center">
-                        <div class="w-12 h-12 bg-blue-100 rounded-lg flex items-center justify-center">
-                            <i data-lucide="message-circle" class="w-6 h-6 text-blue-600"></i>
-                        </div>
-                        <div class="ml-4">
-                            <p class="text-sm font-medium text-gray-600">Total</p>
-                            <p class="text-2xl font-bold text-gray-900">{total_responses}</p>
-                        </div>
-                    </div>
-                </div>
-                <div class="bg-white rounded-xl p-6 card-shadow">
-                    <div class="flex items-center">
-                        <div class="w-12 h-12 bg-accent-100 rounded-lg flex items-center justify-center">
-                            <i data-lucide="zap" class="w-6 h-6 text-accent-600"></i>
-                        </div>
-                        <div class="ml-4">
-                            <p class="text-sm font-medium text-gray-600">Automáticas</p>
-                            <p class="text-2xl font-bold text-accent-600">{auto_count}</p>
-                        </div>
-                    </div>
-                </div>
-                <div class="bg-white rounded-xl p-6 card-shadow">
-                    <div class="flex items-center">
-                        <div class="w-12 h-12 bg-yellow-100 rounded-lg flex items-center justify-center">
-                            <i data-lucide="moon" class="w-6 h-6 text-yellow-600"></i>
-                        </div>
-                        <div class="ml-4">
-                            <p class="text-sm font-medium text-gray-600">Ausência</p>
-                            <p class="text-2xl font-bold text-yellow-600">{absence_count}</p>
-                        </div>
-                    </div>
-                </div>
-                <div class="bg-white rounded-xl p-6 card-shadow">
-                    <div class="flex items-center">
-                        <div class="w-12 h-12 bg-gray-100 rounded-lg flex items-center justify-center">
-                            <i data-lucide="user" class="w-6 h-6 text-gray-600"></i>
-                        </div>
-                        <div class="ml-4">
-                            <p class="text-sm font-medium text-gray-600">Manuais</p>
-                            <p class="text-2xl font-bold text-gray-600">{manual_count}</p>
-                        </div>
-                    </div>
-                </div>
-                <div class="bg-white rounded-xl p-6 card-shadow">
-                    <div class="flex items-center">
-                        <div class="w-12 h-12 bg-purple-100 rounded-lg flex items-center justify-center">
-                            <i data-lucide="clock" class="w-6 h-6 text-purple-600"></i>
-                        </div>
-                        <div class="ml-4">
-                            <p class="text-sm font-medium text-gray-600">Tempo Médio</p>
-                            <p class="text-2xl font-bold text-purple-600">{avg_time}s</p>
-                        </div>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Filters -->
-            <div class="bg-white rounded-xl p-6 card-shadow mb-6">
-                <div class="flex flex-wrap items-center gap-4">
-                    <div class="flex items-center space-x-2">
-                        <label class="text-sm font-medium text-gray-700">Filtrar por tipo:</label>
-                        <select id="typeFilter" class="px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500">
-                            <option value="">Todos</option>
-                            <option value="auto">Automáticas</option>
-                            <option value="absence">Ausência</option>
-                            <option value="manual">Manuais</option>
-                        </select>
-                    </div>
-                    <div class="flex items-center space-x-2">
-                        <label class="text-sm font-medium text-gray-700">Buscar:</label>
-                        <input type="text" id="searchFilter" placeholder="Digite para buscar..." 
-                               class="px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500">
-                    </div>
-                    <button onclick="clearFilters()" class="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200">
-                        Limpar Filtros
-                    </button>
-                </div>
-            </div>
-
-            <!-- History Table -->
-            <div class="bg-white rounded-xl card-shadow">
-                <div class="px-6 py-4 border-b border-gray-200">
-                    <div class="flex items-center justify-between">
-                        <h2 class="text-xl font-semibold text-gray-900">Últimas 100 Respostas</h2>
-                        <button onclick="exportHistory()" class="px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700">
-                            <i data-lucide="download" class="w-4 h-4 mr-2 inline"></i>
-                            Exportar
-                        </button>
-                    </div>
-                </div>
-                
-                <div class="overflow-x-auto">
-                    <table class="min-w-full divide-y divide-gray-200">
-                        <thead class="bg-gray-50">
-                            <tr>
-                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                                    Data/Hora
-                                </th>
-                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                                    Pergunta
-                                </th>
-                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                                    Resposta
-                                </th>
-                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                                    Tipo
-                                </th>
-                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                                    Tempo
-                                </th>
-                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                                    Usuário
-                                </th>
-                            </tr>
-                        </thead>
-                        <tbody class="bg-white divide-y divide-gray-200" id="historyTableBody">
-                            {chr(10).join([f'''
-                            <tr class="hover:bg-gray-50 history-row" data-type="{record.response_type}" data-search="{record.question_text.lower()} {record.response_text.lower()}">
-                                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                                    {format_local_time(record.created_at).strftime('%d/%m/%Y %H:%M') if record.created_at else 'N/A'}
-                                </td>
-                                <td class="px-6 py-4">
-                                    <div class="text-sm text-gray-900 max-w-xs truncate" title="{record.question_text}">
-                                        {record.question_text[:60]}{'...' if len(record.question_text) > 60 else ''}
-                                    </div>
-                                </td>
-                                <td class="px-6 py-4">
-                                    <div class="text-sm text-gray-900 max-w-xs truncate" title="{record.response_text}">
-                                        {record.response_text[:60]}{'...' if len(record.response_text) > 60 else ''}
-                                    </div>
-                                </td>
-                                <td class="px-6 py-4 whitespace-nowrap">
-                                    <span class="inline-flex px-2 py-1 text-xs font-semibold rounded-full {
-                                        'bg-accent-100 text-accent-800' if record.response_type == 'auto' else
-                                        'bg-yellow-100 text-yellow-800' if record.response_type == 'absence' else
-                                        'bg-gray-100 text-gray-800'
-                                    }">
-                                        {
-                                            'Automática' if record.response_type == 'auto' else
-                                            'Ausência' if record.response_type == 'absence' else
-                                            'Manual'
-                                        }
-                                    </span>
-                                </td>
-                                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                                    {f"{record.response_time:.2f}s" if record.response_time else "N/A"}
-                                </td>
-                                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                                    {record.from_user or 'N/A'}
-                                </td>
-                            </tr>
-                            ''' for record in history_records]) if history_records else '''
-                            <tr>
-                                <td colspan="6" class="px-6 py-12 text-center">
-                                    <div class="flex flex-col items-center">
-                                        <i data-lucide="inbox" class="w-12 h-12 text-gray-400 mb-4"></i>
-                                        <h3 class="text-lg font-medium text-gray-900 mb-2">Nenhum histórico encontrado</h3>
-                                        <p class="text-gray-500">As respostas aparecerão aqui conforme forem enviadas.</p>
-                                    </div>
-                                </td>
-                            </tr>
-                            '''}
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-            """
-            
-            custom_scripts = """
-            // Filtros
-            function filterHistory() {
-                const typeFilter = document.getElementById('typeFilter').value;
-                const searchFilter = document.getElementById('searchFilter').value.toLowerCase();
-                const rows = document.querySelectorAll('.history-row');
-                
-                rows.forEach(row => {
-                    const type = row.getAttribute('data-type');
-                    const searchText = row.getAttribute('data-search');
-                    
-                    const typeMatch = !typeFilter || type === typeFilter;
-                    const searchMatch = !searchFilter || searchText.includes(searchFilter);
-                    
-                    if (typeMatch && searchMatch) {
-                        row.style.display = '';
-                    } else {
-                        row.style.display = 'none';
-                    }
-                });
-            }
-            
-            function clearFilters() {
-                document.getElementById('typeFilter').value = '';
-                document.getElementById('searchFilter').value = '';
-                filterHistory();
-            }
-            
-            function exportHistory() {
-                // Implementar exportação
-                alert('Funcionalidade de exportação em desenvolvimento');
-            }
-            
-            // Event listeners
-            document.getElementById('typeFilter').addEventListener('change', filterHistory);
-            document.getElementById('searchFilter').addEventListener('input', filterHistory);
-            """
-            
-            nav_classes = get_navigation_classes('history')
-            layout = get_modern_layout_base()
-            
-            return layout.format(
-                title="Histórico de Respostas",
-                page_title="Histórico de Respostas",
-                content=content,
-                header_actions='<button onclick="exportHistory()" class="px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700">Exportar</button>',
-                custom_scripts=custom_scripts,
-                **nav_classes
-            )
-            
-    except Exception as e:
-        add_debug_log(f"❌ Erro na página de histórico: {e}")
-        return f"<h1>Erro na página de histórico</h1><p>{e}</p>", 500
-
-@app.route('/renovar-tokens')
-def renovar_tokens_page():
-    """Página para renovação de tokens com layout moderno"""
-    try:
-        # Status do token atual
+        # Status do token via API ML
         token_valid = True
         token_message = "Token válido"
+        user_info = None
+        
         try:
             url = "https://api.mercadolibre.com/users/me"
             headers = {"Authorization": f"Bearer {ML_ACCESS_TOKEN}"}
             response = requests.get(url, headers=headers, timeout=10)
-            if response.status_code != 200:
+            if response.status_code == 200:
+                user_info = response.json()
+                token_message = f"Conectado como {user_info.get('nickname', 'N/A')}"
+            else:
                 token_valid = False
                 token_message = f"Erro {response.status_code}"
         except:
@@ -1572,568 +2601,308 @@ def renovar_tokens_page():
             token_message = "Erro de conexão"
         
         # Status da renovação automática
-        try:
-            token_status_info = auto_refresh_manager.get_token_status()
-        except Exception as e:
-            add_debug_log(f"❌ Erro ao obter status de renovação: {e}")
-            token_status_info = {
-                'status': 'unknown',
-                'message': 'Erro ao obter status',
-                'time_remaining': 0,
-                'next_refresh': 0,
-                'auto_refresh_enabled': False,
-                'is_refreshing': False
-            }
+        refresh_status = auto_refresh_manager.get_token_status()
         
-        def format_time_remaining(seconds):
-            if seconds <= 0:
-                return "Expirado"
-            hours = seconds // 3600
-            minutes = (seconds % 3600) // 60
-            if hours > 0:
-                return f"{hours}h {minutes}min"
-            else:
-                return f"{minutes}min"
-        
-        content = f"""
-        <!-- Current Token Status -->
-        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
-            <div class="bg-white rounded-xl p-6 card-shadow">
-                <div class="flex items-center justify-between mb-4">
-                    <h2 class="text-lg font-semibold text-gray-900">Status Atual do Token</h2>
-                    <div class="flex items-center">
-                        <div class="w-3 h-3 bg-{'accent' if token_valid else 'red'}-500 rounded-full mr-2"></div>
-                        <span class="text-sm font-medium text-{'accent' if token_valid else 'red'}-600">{'Válido' if token_valid else 'Inválido'}</span>
-                    </div>
-                </div>
-                
-                <div class="space-y-4">
-                    <div class="flex justify-between items-center">
-                        <span class="text-sm text-gray-600">Access Token</span>
-                        <span class="text-sm font-mono text-gray-900">{ML_ACCESS_TOKEN[:20]}...</span>
-                    </div>
-                    <div class="flex justify-between items-center">
-                        <span class="text-sm text-gray-600">User ID</span>
-                        <span class="text-sm font-mono text-gray-900">{ML_USER_ID}</span>
-                    </div>
-                    <div class="flex justify-between items-center">
-                        <span class="text-sm text-gray-600">Status</span>
-                        <span class="text-sm text-gray-900">{token_message}</span>
-                    </div>
-                    <div class="flex justify-between items-center">
-                        <span class="text-sm text-gray-600">Expira em</span>
-                        <span class="text-sm font-medium text-gray-900">{format_time_remaining(token_status_info['time_remaining'])}</span>
-                    </div>
-                </div>
-            </div>
-
-            <div class="bg-white rounded-xl p-6 card-shadow">
-                <div class="flex items-center justify-between mb-4">
-                    <h2 class="text-lg font-semibold text-gray-900">Renovação Automática</h2>
-                    <div class="flex items-center">
-                        <div class="w-3 h-3 bg-{'blue' if token_status_info['auto_refresh_enabled'] else 'gray'}-500 rounded-full mr-2"></div>
-                        <span class="text-sm font-medium text-{'blue' if token_status_info['auto_refresh_enabled'] else 'gray'}-600">{'Ativa' if token_status_info['auto_refresh_enabled'] else 'Inativa'}</span>
-                    </div>
-                </div>
-                
-                <div class="space-y-4">
-                    <div class="flex justify-between items-center">
-                        <span class="text-sm text-gray-600">Próxima renovação</span>
-                        <span class="text-sm font-medium text-gray-900">{format_time_remaining(token_status_info['next_refresh'])}</span>
-                    </div>
-                    <div class="flex justify-between items-center">
-                        <span class="text-sm text-gray-600">Status do sistema</span>
-                        <span class="text-sm text-gray-900">{token_status_info['message']}</span>
-                    </div>
-                    <div class="flex justify-between items-center">
-                        <span class="text-sm text-gray-600">Auto-renovação</span>
-                        <button onclick="toggleAutoRefresh()" class="text-sm px-3 py-1 rounded-full {'bg-red-100 text-red-700 hover:bg-red-200' if token_status_info['auto_refresh_enabled'] else 'bg-accent-100 text-accent-700 hover:bg-accent-200'}">
-                            {'Pausar' if token_status_info['auto_refresh_enabled'] else 'Ativar'}
-                        </button>
-                    </div>
-                </div>
-            </div>
-        </div>
-
-        <!-- Manual Token Renewal -->
-        <div class="bg-white rounded-xl p-6 card-shadow mb-6">
-            <div class="flex items-center mb-6">
-                <div class="w-10 h-10 bg-blue-100 rounded-lg flex items-center justify-center mr-4">
-                    <i data-lucide="refresh-cw" class="w-5 h-5 text-blue-600"></i>
-                </div>
-                <h2 class="text-xl font-semibold text-gray-900">Renovação Manual de Tokens</h2>
-            </div>
-            
-            <div class="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-6">
-                <div class="flex">
-                    <i data-lucide="info" class="w-5 h-5 text-blue-600 mt-0.5 mr-3"></i>
-                    <div>
-                        <h3 class="text-sm font-medium text-blue-800">Como renovar tokens manualmente</h3>
-                        <div class="mt-2 text-sm text-blue-700">
-                            <ol class="list-decimal list-inside space-y-1">
-                                <li>Clique no botão "Abrir Autorização do ML" abaixo</li>
-                                <li>Faça login na sua conta do Mercado Livre</li>
-                                <li>Autorize o aplicativo</li>
-                                <li>Copie o código da URL de retorno e cole abaixo</li>
-                            </ol>
-                        </div>
-                    </div>
-                </div>
-            </div>
-            
-            <div class="space-y-6">
-                <div class="text-center">
-                    <a href="https://auth.mercadolibre.com.br/authorization?response_type=code&client_id={ML_CLIENT_ID}&redirect_uri=https://bot-mercadolivre-dettech.onrender.com/api/ml/webhook" 
-                       target="_blank" 
-                       class="inline-flex items-center px-6 py-3 bg-accent-600 text-white rounded-lg hover:bg-accent-700 focus:ring-2 focus:ring-accent-500 focus:ring-offset-2">
-                        <i data-lucide="external-link" class="w-5 h-5 mr-2"></i>
-                        Abrir Autorização do ML
-                    </a>
-                </div>
-                
-                <div>
-                    <label for="authCode" class="block text-sm font-medium text-gray-700 mb-2">
-                        Código de Autorização
-                    </label>
-                    <div class="bg-blue-50 border border-blue-200 rounded-lg p-3 mb-3">
-                        <p class="text-sm text-blue-700">
-                            <strong>Formato esperado:</strong> TG-xxxxxxxxxxxxxxxxxxxxxxx-xxxxxxxxx
-                        </p>
-                    </div>
-                    <input type="text" id="authCode" 
-                           class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500"
-                           placeholder="TG-68841862c4a8a9000124716e-180617463">
-                </div>
-                
-                <div class="flex justify-center">
-                    <button onclick="processAuthCode()" 
-                            class="px-8 py-3 bg-primary-600 text-white rounded-lg hover:bg-primary-700 focus:ring-2 focus:ring-primary-500 focus:ring-offset-2 flex items-center">
-                        <i data-lucide="key" class="w-5 h-5 mr-2"></i>
-                        Processar Código
-                    </button>
-                </div>
-            </div>
-        </div>
-
-        <!-- Response Area -->
-        <div id="responseArea" class="hidden">
-            <div class="bg-white rounded-xl p-6 card-shadow">
-                <div class="flex items-center mb-4">
-                    <div id="responseIcon" class="w-10 h-10 rounded-lg flex items-center justify-center mr-4">
-                        <i data-lucide="check-circle" class="w-5 h-5"></i>
-                    </div>
-                    <h2 id="responseTitle" class="text-xl font-semibold text-gray-900">Resultado</h2>
-                </div>
-                <div id="responseContent" class="text-gray-700"></div>
-            </div>
-        </div>
-        """
-        
-        custom_scripts = f"""
-        async function toggleAutoRefresh() {{
-            try {{
-                const response = await fetch('/api/tokens/toggle-auto-refresh', {{
-                    method: 'POST'
-                }});
-                const result = await response.json();
-                if (result.success) {{
-                    window.location.reload();
-                }} else {{
-                    alert('Erro: ' + result.message);
-                }}
-            }} catch (error) {{
-                alert('Erro ao alterar auto-renovação');
-            }}
-        }}
-        
-        async function processAuthCode() {{
-            const code = document.getElementById('authCode').value.trim();
-            
-            if (!code) {{
-                alert('Por favor, insira o código de autorização');
-                return;
-            }}
-            
-            const responseArea = document.getElementById('responseArea');
-            const responseIcon = document.getElementById('responseIcon');
-            const responseTitle = document.getElementById('responseTitle');
-            const responseContent = document.getElementById('responseContent');
-            
-            // Show loading
-            responseArea.classList.remove('hidden');
-            responseIcon.className = 'w-10 h-10 bg-blue-100 rounded-lg flex items-center justify-center mr-4';
-            responseIcon.innerHTML = '<i data-lucide="loader-2" class="w-5 h-5 text-blue-600 animate-spin"></i>';
-            responseTitle.textContent = 'Processando...';
-            responseContent.textContent = 'Aguarde enquanto processamos o código de autorização...';
-            
-            try {{
-                const response = await fetch('/api/tokens/process-code-flexible', {{
-                    method: 'POST',
-                    headers: {{'Content-Type': 'application/json'}},
-                    body: JSON.stringify({{code: code}})
-                }});
-                
-                const result = await response.json();
-                
-                if (result.success) {{
-                    responseIcon.className = 'w-10 h-10 bg-accent-100 rounded-lg flex items-center justify-center mr-4';
-                    responseIcon.innerHTML = '<i data-lucide="check-circle" class="w-5 h-5 text-accent-600"></i>';
-                    responseTitle.textContent = 'Tokens Atualizados com Sucesso!';
-                    responseContent.innerHTML = `
-                        <div class="space-y-2">
-                            <p><strong>User ID:</strong> ${{result.user_id}}</p>
-                            <p><strong>Token:</strong> ${{code}}</p>
-                            <p class="text-accent-600 font-medium">O sistema já está usando os novos tokens.</p>
-                        </div>
-                    `;
-                    
-                    // Reload page after 3 seconds
-                    setTimeout(() => {{
-                        window.location.reload();
-                    }}, 3000);
-                }} else {{
-                    responseIcon.className = 'w-10 h-10 bg-red-100 rounded-lg flex items-center justify-center mr-4';
-                    responseIcon.innerHTML = '<i data-lucide="x-circle" class="w-5 h-5 text-red-600"></i>';
-                    responseTitle.textContent = 'Erro ao processar código';
-                    responseContent.innerHTML = `
-                        <div class="text-red-700">
-                            <p><strong>Erro:</strong> ${{result.message}}</p>
-                            <p class="mt-2 text-sm">Verifique se o código está correto e tente novamente.</p>
-                        </div>
-                    `;
-                }}
-            }} catch (error) {{
-                responseIcon.className = 'w-10 h-10 bg-red-100 rounded-lg flex items-center justify-center mr-4';
-                responseIcon.innerHTML = '<i data-lucide="x-circle" class="w-5 h-5 text-red-600"></i>';
-                responseTitle.textContent = 'Erro de conexão';
-                responseContent.innerHTML = `
-                    <div class="text-red-700">
-                        <p>Não foi possível conectar ao servidor.</p>
-                        <p class="mt-2 text-sm">Verifique sua conexão e tente novamente.</p>
-                    </div>
-                `;
-            }}
-            
-            // Re-initialize icons
-            lucide.createIcons();
-        }}
-        """
-        
-        nav_classes = get_navigation_classes('tokens')
-        layout = get_modern_layout_base()
-        
-        return layout.format(
-            title="Renovação de Tokens",
-            page_title="Gerenciar Tokens",
-            content=content,
-            header_actions='<button onclick="toggleAutoRefresh()" class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700">Auto-renovação</button>',
-            custom_scripts=custom_scripts,
-            **nav_classes
-        )
+        return jsonify({
+            "success": True,
+            "token": {
+                "valid": token_valid,
+                "message": token_message,
+                "access_token": ML_ACCESS_TOKEN[:20] + "..." if ML_ACCESS_TOKEN else "N/A",
+                "user_id": ML_USER_ID,
+                "user_info": user_info
+            },
+            "auto_refresh": refresh_status,
+            "timestamp": get_local_time().isoformat()
+        })
         
     except Exception as e:
-        add_debug_log(f"❌ Erro na página de tokens: {e}")
-        return f"<h1>Erro na página de tokens</h1><p>{e}</p>", 500
+        add_debug_log(f"❌ Erro ao obter status do token: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
 
-
-@app.route('/debug-full')
-def debug_full_page():
-    """Página de debug completa com layout moderno"""
+@app.route('/api/tokens/toggle-auto-refresh', methods=['POST'])
+def api_toggle_auto_refresh():
+    """API para habilitar/desabilitar renovação automática"""
     try:
-        # Estatísticas dos logs
-        total_logs = len(debug_logs)
-        error_logs = len([log for log in debug_logs if '❌' in log])
-        success_logs = len([log for log in debug_logs if '✅' in log])
-        warning_logs = len([log for log in debug_logs if '⚠️' in log])
+        current_status = auto_refresh_manager.auto_refresh_enabled
         
-        content = f"""
-        <!-- Debug Statistics -->
-        <div class="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
-            <div class="bg-white rounded-xl p-6 card-shadow">
-                <div class="flex items-center">
-                    <div class="w-12 h-12 bg-blue-100 rounded-lg flex items-center justify-center">
-                        <i data-lucide="activity" class="w-6 h-6 text-blue-600"></i>
-                    </div>
-                    <div class="ml-4">
-                        <p class="text-sm font-medium text-gray-600">Total de Logs</p>
-                        <p class="text-2xl font-bold text-gray-900">{total_logs}</p>
-                    </div>
-                </div>
-            </div>
-            <div class="bg-white rounded-xl p-6 card-shadow">
-                <div class="flex items-center">
-                    <div class="w-12 h-12 bg-red-100 rounded-lg flex items-center justify-center">
-                        <i data-lucide="x-circle" class="w-6 h-6 text-red-600"></i>
-                    </div>
-                    <div class="ml-4">
-                        <p class="text-sm font-medium text-gray-600">Erros</p>
-                        <p class="text-2xl font-bold text-red-600">{error_logs}</p>
-                    </div>
-                </div>
-            </div>
-            <div class="bg-white rounded-xl p-6 card-shadow">
-                <div class="flex items-center">
-                    <div class="w-12 h-12 bg-accent-100 rounded-lg flex items-center justify-center">
-                        <i data-lucide="check-circle" class="w-6 h-6 text-accent-600"></i>
-                    </div>
-                    <div class="ml-4">
-                        <p class="text-sm font-medium text-gray-600">Sucessos</p>
-                        <p class="text-2xl font-bold text-accent-600">{success_logs}</p>
-                    </div>
-                </div>
-            </div>
-            <div class="bg-white rounded-xl p-6 card-shadow">
-                <div class="flex items-center">
-                    <div class="w-12 h-12 bg-yellow-100 rounded-lg flex items-center justify-center">
-                        <i data-lucide="alert-triangle" class="w-6 h-6 text-yellow-600"></i>
-                    </div>
-                    <div class="ml-4">
-                        <p class="text-sm font-medium text-gray-600">Avisos</p>
-                        <p class="text-2xl font-bold text-yellow-600">{warning_logs}</p>
-                    </div>
-                </div>
-            </div>
-        </div>
-
-        <!-- Debug Controls -->
-        <div class="bg-white rounded-xl p-6 card-shadow mb-6">
-            <div class="flex flex-wrap items-center justify-between gap-4">
-                <div class="flex items-center space-x-4">
-                    <h2 class="text-lg font-semibold text-gray-900">Controles de Debug</h2>
-                    <div class="flex items-center space-x-2">
-                        <input type="checkbox" id="autoScroll" checked class="text-primary-600 focus:ring-primary-500">
-                        <label for="autoScroll" class="text-sm text-gray-700">Auto-scroll</label>
-                    </div>
-                    <div class="flex items-center space-x-2">
-                        <input type="checkbox" id="autoRefresh" checked class="text-primary-600 focus:ring-primary-500">
-                        <label for="autoRefresh" class="text-sm text-gray-700">Auto-refresh (5s)</label>
-                    </div>
-                </div>
-                <div class="flex items-center space-x-2">
-                    <select id="logFilter" class="px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500">
-                        <option value="">Todos os logs</option>
-                        <option value="❌">Apenas erros</option>
-                        <option value="✅">Apenas sucessos</option>
-                        <option value="⚠️">Apenas avisos</option>
-                        <option value="🔄">Processamento</option>
-                        <option value="📩">Perguntas</option>
-                    </select>
-                    <button onclick="clearLogs()" class="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700">
-                        <i data-lucide="trash-2" class="w-4 h-4 mr-2 inline"></i>
-                        Limpar
-                    </button>
-                    <button onclick="exportLogs()" class="px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700">
-                        <i data-lucide="download" class="w-4 h-4 mr-2 inline"></i>
-                        Exportar
-                    </button>
-                </div>
-            </div>
-        </div>
-
-        <!-- Debug Terminal -->
-        <div class="bg-gray-900 rounded-xl card-shadow overflow-hidden">
-            <div class="bg-gray-800 px-6 py-3 border-b border-gray-700">
-                <div class="flex items-center justify-between">
-                    <div class="flex items-center space-x-3">
-                        <div class="flex space-x-2">
-                            <div class="w-3 h-3 bg-red-500 rounded-full"></div>
-                            <div class="w-3 h-3 bg-yellow-500 rounded-full"></div>
-                            <div class="w-3 h-3 bg-accent-500 rounded-full"></div>
-                        </div>
-                        <span class="text-sm font-medium text-gray-300">Debug Terminal</span>
-                    </div>
-                    <div class="flex items-center space-x-2">
-                        <span class="text-xs text-gray-400">Última atualização: <span id="lastUpdate">Agora</span></span>
-                        <div class="w-2 h-2 bg-accent-500 rounded-full animate-pulse"></div>
-                    </div>
-                </div>
-            </div>
-            
-            <div class="p-6 h-96 overflow-y-auto font-mono text-sm" id="debugTerminal">
-                <div id="debugLogs">
-                    {chr(10).join([f'<div class="debug-log-line text-gray-300 mb-1" data-log="{log}">{log}</div>' for log in debug_logs[-50:]]) if debug_logs else '<div class="text-gray-500">Nenhum log disponível. Os logs aparecerão aqui conforme o sistema funciona.</div>'}
-                </div>
-            </div>
-        </div>
-
-        <!-- System Information -->
-        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mt-8">
-            <div class="bg-white rounded-xl p-6 card-shadow">
-                <h3 class="text-lg font-semibold text-gray-900 mb-4">Informações do Sistema</h3>
-                <div class="space-y-3">
-                    <div class="flex justify-between">
-                        <span class="text-sm text-gray-600">Versão do Bot</span>
-                        <span class="text-sm font-medium text-gray-900">v2.0.0</span>
-                    </div>
-                    <div class="flex justify-between">
-                        <span class="text-sm text-gray-600">Uptime</span>
-                        <span class="text-sm font-medium text-gray-900" id="uptime">Calculando...</span>
-                    </div>
-                    <div class="flex justify-between">
-                        <span class="text-sm text-gray-600">Última verificação</span>
-                        <span class="text-sm font-medium text-gray-900" id="lastCheck">Agora</span>
-                    </div>
-                    <div class="flex justify-between">
-                        <span class="text-sm text-gray-600">Status do Token</span>
-                        <span class="text-sm font-medium text-accent-600">Válido</span>
-                    </div>
-                </div>
-            </div>
-            
-            <div class="bg-white rounded-xl p-6 card-shadow">
-                <h3 class="text-lg font-semibold text-gray-900 mb-4">Métricas de Performance</h3>
-                <div class="space-y-3">
-                    <div class="flex justify-between">
-                        <span class="text-sm text-gray-600">Perguntas processadas</span>
-                        <span class="text-sm font-medium text-gray-900">{ResponseHistory.query.count() if ResponseHistory.query.count() else 0}</span>
-                    </div>
-                    <div class="flex justify-between">
-                        <span class="text-sm text-gray-600">Tempo médio de resposta</span>
-                        <span class="text-sm font-medium text-gray-900">1.2s</span>
-                    </div>
-                    <div class="flex justify-between">
-                        <span class="text-sm text-gray-600">Taxa de sucesso</span>
-                        <span class="text-sm font-medium text-accent-600">98.5%</span>
-                    </div>
-                    <div class="flex justify-between">
-                        <span class="text-sm text-gray-600">Regras ativas</span>
-                        <span class="text-sm font-medium text-gray-900">{ResponseRule.query.filter_by(is_active=True).count() if ResponseRule.query.filter_by(is_active=True).count() else 0}</span>
-                    </div>
-                </div>
-            </div>
-        </div>
-        """
+        if current_status:
+            auto_refresh_manager.disable_auto_refresh()
+            message = "Auto-renovação desabilitada"
+            add_debug_log("🛑 Auto-renovação desabilitada via API")
+        else:
+            auto_refresh_manager.enable_auto_refresh()
+            # Tentar inicializar se temos refresh token
+            if ML_REFRESH_TOKEN:
+                initialize_auto_refresh()
+            message = "Auto-renovação habilitada"
+            add_debug_log("🚀 Auto-renovação habilitada via API")
         
-        custom_scripts = """
-        let autoRefreshInterval;
-        
-        function updateDebugLogs() {
-            fetch('/api/debug/logs?limit=50')
-                .then(response => response.json())
-                .then(data => {
-                    const debugLogs = document.getElementById('debugLogs');
-                    const autoScroll = document.getElementById('autoScroll').checked;
-                    const filter = document.getElementById('logFilter').value;
-                    
-                    let filteredLogs = data.logs;
-                    if (filter) {
-                        filteredLogs = data.logs.filter(log => log.includes(filter));
-                    }
-                    
-                    debugLogs.innerHTML = filteredLogs.map(log => 
-                        `<div class="debug-log-line text-gray-300 mb-1" data-log="${log}">${log}</div>`
-                    ).join('');
-                    
-                    if (autoScroll) {
-                        const terminal = document.getElementById('debugTerminal');
-                        terminal.scrollTop = terminal.scrollHeight;
-                    }
-                    
-                    document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString();
-                })
-                .catch(error => console.error('Erro ao atualizar logs:', error));
-        }
-        
-        function startAutoRefresh() {
-            if (autoRefreshInterval) {
-                clearInterval(autoRefreshInterval);
-            }
-            
-            if (document.getElementById('autoRefresh').checked) {
-                autoRefreshInterval = setInterval(updateDebugLogs, 5000);
-            }
-        }
-        
-        function clearLogs() {
-            if (confirm('Tem certeza que deseja limpar todos os logs?')) {
-                fetch('/api/debug/clear-logs', {method: 'POST'})
-                    .then(response => response.json())
-                    .then(data => {
-                        if (data.success) {
-                            updateDebugLogs();
-                        } else {
-                            alert('Erro ao limpar logs');
-                        }
-                    })
-                    .catch(error => alert('Erro de conexão'));
-            }
-        }
-        
-        function exportLogs() {
-            fetch('/api/debug/logs?limit=1000')
-                .then(response => response.json())
-                .then(data => {
-                    const blob = new Blob([data.logs.join('\\n')], {type: 'text/plain'});
-                    const url = window.URL.createObjectURL(blob);
-                    const a = document.createElement('a');
-                    a.href = url;
-                    a.download = `debug-logs-${new Date().toISOString().split('T')[0]}.txt`;
-                    document.body.appendChild(a);
-                    a.click();
-                    document.body.removeChild(a);
-                    window.URL.revokeObjectURL(url);
-                })
-                .catch(error => alert('Erro ao exportar logs'));
-        }
-        
-        // Event listeners
-        document.getElementById('autoRefresh').addEventListener('change', startAutoRefresh);
-        document.getElementById('logFilter').addEventListener('change', updateDebugLogs);
-        
-        // Initialize
-        startAutoRefresh();
-        updateDebugLogs();
-        """
-        
-        nav_classes = get_navigation_classes('debug')
-        layout = get_modern_layout_base()
-        
-        return layout.format(
-            title="Debug e Logs",
-            page_title="Debug e Monitoramento",
-            content=content,
-            header_actions='<button onclick="clearLogs()" class="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700">Limpar Logs</button>',
-            custom_scripts=custom_scripts,
-            **nav_classes
-        )
+        return jsonify({
+            "success": True,
+            "message": message,
+            "auto_refresh_enabled": auto_refresh_manager.auto_refresh_enabled
+        })
         
     except Exception as e:
-        add_debug_log(f"❌ Erro na página de debug: {e}")
-        return f"<h1>Erro na página de debug</h1><p>{e}</p>", 500
+        add_debug_log(f"❌ Erro ao alterar auto-renovação: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
 
-# ========== FINALIZAÇÃO DO SISTEMA ==========
-
-# Copiar todas as outras funções e rotas do sistema original
-# (process_questions, fetch_unanswered_questions, webhook, APIs, etc.)
-
-if __name__ == '__main__':
+@app.route('/api/tokens/force-refresh', methods=['POST'])
+def api_force_refresh():
+    """API para forçar renovação imediata do token"""
     try:
-        add_debug_log("🚀 Iniciando sistema com layout moderno...")
+        add_debug_log("🔄 Renovação forçada via API iniciada...")
         
+        # Verificar se já está renovando
+        if auto_refresh_manager.is_refreshing:
+            return jsonify({
+                "success": False,
+                "error": "Renovação já em andamento"
+            }), 400
+        
+        # Executar renovação
+        success, result = auto_refresh_manager.process_refresh_token_internal()
+        
+        if success:
+            # Atualizar tokens no sistema
+            auto_refresh_manager.update_system_tokens_internal(
+                result['access_token'],
+                result['refresh_token'],
+                result['user_id']
+            )
+            
+            # Reiniciar auto-renovação com novo token
+            auto_refresh_manager.start_auto_refresh(result.get('expires_in', 21600))
+            
+            add_debug_log("✅ Renovação forçada concluída com sucesso")
+            
+            return jsonify({
+                "success": True,
+                "message": "Token renovado com sucesso",
+                "token_info": {
+                    "access_token": result['access_token'][:20] + "...",
+                    "user_id": result['user_id'],
+                    "expires_in": result.get('expires_in', 21600)
+                }
+            })
+        else:
+            add_debug_log(f"❌ Falha na renovação forçada: {result.get('error', 'Erro desconhecido')}")
+            return jsonify({
+                "success": False,
+                "error": result.get('error', 'Erro na renovação')
+            }), 400
+            
+    except Exception as e:
+        add_debug_log(f"❌ Erro na renovação forçada: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@app.route('/api/tokens/refresh-info', methods=['GET'])
+def api_refresh_info():
+    """API para obter informações detalhadas sobre renovação"""
+    try:
+        status = auto_refresh_manager.get_token_status()
+        
+        # Informações adicionais
+        info = {
+            "refresh_interval_hours": auto_refresh_manager.refresh_interval / 3600,
+            "has_refresh_token": bool(ML_REFRESH_TOKEN),
+            "system_time": get_local_time().isoformat(),
+            "uptime_seconds": time.time() - (auto_refresh_manager.token_created_at or time.time())
+        }
+        
+        return jsonify({
+            "success": True,
+            "status": status,
+            "info": info
+        })
+        
+    except Exception as e:
+        add_debug_log(f"❌ Erro ao obter info de renovação: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+# ========== INICIALIZAÇÃO E MONITORAMENTO DO SISTEMA ==========
+
+def start_background_tasks():
+    """Inicia todas as tarefas em background do sistema"""
+    add_debug_log("🚀 Iniciando sistema Bot ML completo...")
+    
+    try:
         # Inicializar banco de dados
-        with app.app_context():
-            initialize_database()
-            add_debug_log("✅ Banco de dados inicializado")
+        initialize_database()
         
-        # Inicializar renovação automática se disponível
-        try:
-            auto_refresh_manager.initialize_auto_refresh()
-            add_debug_log("✅ Sistema de renovação automática inicializado")
-        except Exception as e:
-            add_debug_log(f"⚠️ Renovação automática não disponível: {e}")
+        # Criar dados padrão se necessário
+        create_default_data()
         
-        # Iniciar tarefas em background
-        start_background_tasks()
-        add_debug_log("✅ Tarefas em background iniciadas")
+        # Inicializar sistema de renovação automática
+        if ML_REFRESH_TOKEN:
+            initialize_auto_refresh()
+            add_debug_log("🔄 Sistema de renovação automática inicializado")
+        else:
+            add_debug_log("⚠️ Refresh token não disponível - renovação automática não iniciada")
         
-        # Iniciar servidor
-        port = int(os.environ.get('PORT', 5000))
-        add_debug_log(f"🌐 Servidor iniciando na porta {port}")
+        # Iniciar monitoramento de perguntas em thread separada
+        monitor_thread = threading.Thread(target=monitor_questions, daemon=True)
+        monitor_thread.start()
+        add_debug_log("✅ Thread de monitoramento iniciada")
         
-        app.run(host='0.0.0.0', port=port, debug=False)
+        add_debug_log("✅ Sistema Bot ML iniciado com sucesso!")
+        add_debug_log("🔍 Debug ativo - todos os logs serão registrados")
+        add_debug_log("🤖 Monitoramento de perguntas ativo (30s)")
+        add_debug_log("🌙 Sistema de ausência configurado")
+        add_debug_log("🔄 Renovação manual de tokens disponível")
+        add_debug_log("🔄 Renovação automática de tokens ativa (5h)")
+        add_debug_log("📊 Interface web completa disponível")
         
     except Exception as e:
         add_debug_log(f"❌ Erro crítico na inicialização: {e}")
-        print(f"Erro crítico: {e}")
-        sys.exit(1)
+        print(f"❌ ERRO CRÍTICO: {e}")
+
+# ========== ROTA DE STATUS PARA MONITORAMENTO ==========
+@app.route('/status')
+def status():
+    """Endpoint de status para monitoramento externo"""
+    try:
+        # Verificar banco de dados
+        with app.app_context():
+            user_count = User.query.count()
+            question_count = Question.query.count()
+            rule_count = AutoResponse.query.filter_by(is_active=True).count()
+            absence_count = AbsenceConfig.query.filter_by(is_active=True).count()
+        
+        # Verificar token
+        token_valid = True
+        try:
+            url = "https://api.mercadolibre.com/users/me"
+            headers = {"Authorization": f"Bearer {ML_ACCESS_TOKEN}"}
+            response = requests.get(url, headers=headers, timeout=5)
+            token_valid = response.status_code == 200
+        except:
+            token_valid = False
+        
+        status_data = {
+            "status": "ok",
+            "timestamp": get_local_time().isoformat(),
+            "database": {
+                "users": user_count,
+                "questions": question_count,
+                "active_rules": rule_count,
+                "active_absence_configs": absence_count
+            },
+            "token": {
+                "valid": token_valid,
+                "user_id": ML_USER_ID
+            },
+            "system": {
+                "data_dir": DATA_DIR,
+                "debug_logs": len(DEBUG_LOGS),
+                "initialized": _initialized
+            }
+        }
+        
+        return jsonify(status_data)
+        
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "error": str(e),
+            "timestamp": get_local_time().isoformat()
+        }), 500
+
+# ========== ROTA DE SAÚDE PARA RENDER ==========
+@app.route('/health')
+def health():
+    """Endpoint de saúde para o Render"""
+    return jsonify({
+        "status": "healthy",
+        "timestamp": get_local_time().isoformat(),
+        "service": "bot-mercadolivre"
+    })
+
+# ========== TRATAMENTO DE ERROS ==========
+@app.errorhandler(404)
+def not_found(error):
+    """Página de erro 404 personalizada"""
+    content = create_header("❌ Página Não Encontrada")
+    content += """
+    <div class="card">
+        <div class="alert alert-warning">
+            <h4>Página não encontrada</h4>
+            <p>A página que você está procurando não existe.</p>
+        </div>
+        <a href="/" class="btn">🏠 Voltar ao Dashboard</a>
+    </div>
+    """
+    return create_base_template("Erro 404", content), 404
+
+@app.errorhandler(500)
+def internal_error(error):
+    """Página de erro 500 personalizada"""
+    content = create_header("❌ Erro Interno")
+    content += """
+    <div class="card">
+        <div class="alert alert-danger">
+            <h4>Erro interno do servidor</h4>
+            <p>Ocorreu um erro interno. Tente novamente em alguns instantes.</p>
+        </div>
+        <a href="/" class="btn">🏠 Voltar ao Dashboard</a>
+        <a href="/debug-full" class="btn btn-warning">🔍 Ver Logs</a>
+    </div>
+    """
+    return create_base_template("Erro 500", content), 500
+
+# ========== FUNÇÃO PRINCIPAL ==========
+if __name__ == '__main__':
+    print("=" * 60)
+    print("🤖 BOT DO MERCADO LIVRE - SISTEMA COMPLETO FUNCIONAL")
+    print("=" * 60)
+    print(f"📅 Data: {get_local_time().strftime('%d/%m/%Y %H:%M:%S')}")
+    print(f"📁 Dados: {DATA_DIR}")
+    print(f"🗄️ Banco: {DATABASE_PATH}")
+    print(f"🔑 Token: {ML_ACCESS_TOKEN[:20]}...")
+    print(f"👤 User ID: {ML_USER_ID}")
+    print("=" * 60)
+    print()
+    print("FUNCIONALIDADES INTEGRADAS:")
+    print("✅ Sistema de ausência e regras automáticas")
+    print("✅ Renovação manual de tokens com interface web")
+    print("✅ Layout minimalista e responsivo")
+    print("✅ Histórico detalhado de respostas")
+    print("✅ Debug e logs em tempo real")
+    print("✅ Configuração de dados persistentes")
+    print("✅ Fuso horário São Paulo (UTC-3)")
+    print("✅ Interface web completa")
+    print("✅ APIs REST para gerenciamento")
+    print("✅ Monitoramento contínuo")
+    print("✅ Webhook do Mercado Livre")
+    print()
+    print("PÁGINAS DISPONÍVEIS:")
+    print("🏠 / - Dashboard principal")
+    print("✏️ /edit-rules - Editar regras")
+    print("🌙 /edit-absence - Configurar ausência")
+    print("📊 /history - Histórico de respostas")
+    print("🔄 /renovar-tokens - Renovar tokens")
+    print("🔍 /debug-full - Debug completo")
+    print("📊 /status - Status do sistema")
+    print("❤️ /health - Saúde do serviço")
+    print()
+    print("WEBHOOK:")
+    print("📨 /api/ml/webhook - Receber notificações do ML")
+    print()
+    
+    # Inicializar sistema
+    start_background_tasks()
+    
+    print("🚀 Iniciando servidor Flask...")
+    print("🌐 Acesse: http://localhost:5000")
+    print("=" * 60)
+    
+    # Iniciar servidor Flask
+    app.run(
+        host='0.0.0.0',
+        port=5000,
+        debug=False,
+        threaded=True
+    )
 
