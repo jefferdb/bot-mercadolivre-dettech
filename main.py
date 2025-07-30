@@ -687,22 +687,27 @@ def process_questions():
                     
                     # Verificar se já processamos esta pergunta
                     existing = Question.query.filter_by(ml_question_id=question_id).first()
-                    if existing:
-                        add_debug_log(f"   ⏭️ Pergunta já processada")
+                    if existing and existing.is_answered:
+                        add_debug_log(f"   ⏭️ Pergunta já respondida")
                         continue
                     
-                    start_time = time.time()
-                    
-                    # Salvar pergunta no banco
-                    question = Question(
-                        ml_question_id=question_id,
-                        user_id=user.id,
-                        item_id=item_id,
-                        question_text=question_text,
-                        is_answered=False
-                    )
-                    db.session.add(question)
-                    db.session.flush()  # Para obter o ID
+                    # Se pergunta existe mas não foi respondida, reprocessar
+                    if existing and not existing.is_answered:
+                        add_debug_log(f"   🔄 Reprocessando pergunta não respondida")
+                        question = existing
+                        start_time = time.time()  # Tempo para reprocessamento
+                    else:
+                        # Nova pergunta - salvar no banco
+                        start_time = time.time()
+                        question = Question(
+                            ml_question_id=question_id,
+                            user_id=user.id,
+                            item_id=item_id,
+                            question_text=question_text,
+                            is_answered=False
+                        )
+                        db.session.add(question)
+                        db.session.flush()  # Para obter o ID
                     
                     response_type = None
                     keywords_matched = None
