@@ -96,107 +96,94 @@ import threading
 import time
 
 class AutoTokenRefresh:
-    """Sistema de renovação automática de tokens baseado em tempo"""
-    
+    """Sistema de renovação automática de tokens baseado em tempo (multi-conta-ready)."""
+
     def __init__(self):
+        self.ml_user_id = None  # identifica o usuário dono do token
         self.refresh_timer = None
         self.is_refreshing = False
         self.token_created_at = None
         self.token_expires_at = None
         self.auto_refresh_enabled = True
         self.refresh_interval = 5 * 3600  # 5 horas em segundos
-        
+
     def start_auto_refresh(self, expires_in=21600):
         """
-        Inicia sistema de renovação automática
-        Args:
-            expires_in: Tempo de expiração em segundos (padrão: 6 horas)
+        Inicia sistema de renovação automática.
+        :param expires_in: Tempo de expiração do access token em segundos (padrão: 6 horas).
         """
         if not self.auto_refresh_enabled:
             add_debug_log("🔄 Auto-renovação desabilitada")
             return
-            
+
         # Cancelar timer anterior se existir
         if self.refresh_timer:
             self.refresh_timer.cancel()
             add_debug_log("⏹️ Timer anterior cancelado")
-        
+
         # Calcular quando renovar (5 horas = 18000 segundos)
-        refresh_delay = min(self.refresh_interval, max(expires_in - 3600, 300))  # Min 5 minutos
-        
+        refresh_delay = min(self.refresh_interval, max(expires_in - 3600, 300))  # mínimo 5 minutos
+
         # Atualizar timestamps
         self.token_created_at = time.time()
         self.token_expires_at = self.token_created_at + expires_in
-        
+
         # Agendar renovação
         self.refresh_timer = threading.Timer(refresh_delay, self.auto_refresh)
         self.refresh_timer.start()
-        
+
         # Log detalhado
         refresh_time = datetime.fromtimestamp(self.token_created_at + refresh_delay)
         expires_time = datetime.fromtimestamp(self.token_expires_at)
-        
         add_debug_log(f"🕐 Auto-renovação agendada para {refresh_delay}s ({refresh_time.strftime('%H:%M:%S')})")
         add_debug_log(f"⏰ Token expira em: {expires_time.strftime('%H:%M:%S')}")
-        
+
     def auto_refresh(self):
-        """Executa renovação automática do token"""
+        """Executa renovação automática do token."""
         if self.is_refreshing:
             add_debug_log("⚠️ Renovação já em andamento, ignorando")
             return
-            
+
         self.is_refreshing = True
-        
         try:
             add_debug_log("🔄 Iniciando renovação automática de token...")
-            
-            # Usar função existente de renovação
             success, result = self.process_refresh_token_internal()
-            
+
             if success:
-                # Atualizar tokens no sistema
                 self.update_system_tokens_internal(
                     result['access_token'],
-                    result['refresh_token'],
-                    result['user_id']
+                    result.get('refresh_token', ''),
+                    result.get('user_id')
                 )
-                
-                # Agendar próxima renovação
                 self.start_auto_refresh(result.get('expires_in', 21600))
                 add_debug_log("✅ Renovação automática concluída com sucesso")
-                
             else:
-                # Tentar novamente em 10 minutos
-                retry_delay = 600
+                retry_delay = 600  # 10 min
                 self.refresh_timer = threading.Timer(retry_delay, self.auto_refresh)
                 self.refresh_timer.start()
                 add_debug_log(f"❌ Falha na renovação automática, tentando novamente em {retry_delay//60} min")
-                
         except Exception as e:
             add_debug_log(f"❌ Erro na renovação automática: {e}")
-            # Tentar novamente em 5 minutos
-            retry_delay = 300
+            retry_delay = 300  # 5 min
             self.refresh_timer = threading.Timer(retry_delay, self.auto_refresh)
             self.refresh_timer.start()
             add_debug_log(f"🔄 Reagendando tentativa em {retry_delay//60} min")
-            
         finally:
             self.is_refreshing = False
-    
-    
-def process_refresh_token_internal(self):
+
+    def process_refresh_token_internal(self):
         """Processa renovação usando refresh token do usuário configurado (ou global como fallback)."""
         rt = None
         uid = None
-
         try:
-            if getattr(self, 'ml_user_id', None):
+            if self.ml_user_id:
                 with app.app_context():
                     u = User.query.filter_by(ml_user_id=str(self.ml_user_id)).first()
                     if u and u.refresh_token:
                         rt = u.refresh_token
                         uid = str(self.ml_user_id)
             if not rt:
+                # fallback compatível com o comportamento antigo
                 rt = ML_REFRESH_TOKEN
                 uid = ML_USER_ID
 
@@ -216,7 +203,6 @@ def process_refresh_token_internal(self):
 
             if response.status_code == 200:
                 token_data = response.json()
-
                 result = {
                     'success': True,
                     'access_token': token_data['access_token'],
@@ -224,29 +210,26 @@ def process_refresh_token_internal(self):
                     'user_id': str(token_data.get('user_id', uid)),
                     'expires_in': token_data.get('expires_in', 21600)
                 }
-
                 add_debug_log("✅ Renovação via refresh token bem-sucedida")
                 return True, result
 
-            else:
-                error_msg = f"Erro {response.status_code}: {response.text}"
-                add_debug_log(f"❌ Falha na renovação: {error_msg}")
-                return False, {'error': error_msg}
+            error_msg = f"Erro {response.status_code}: {response.text}"
+            add_debug_log(f"❌ Falha na renovação: {error_msg}")
+            return False, {'error': error_msg}
 
         except Exception as e:
             add_debug_log(f"❌ Erro na requisição de renovação: {e}")
             return False, {'error': str(e)}
 
-def update_system_tokens_internal(self, access_token, refresh_token, user_id):
-(self, access_token, refresh_token, user_id):
+    def update_system_tokens_internal(self, access_token, refresh_token, user_id):
         """Atualiza tokens no sistema"""
         global ML_ACCESS_TOKEN, ML_REFRESH_TOKEN, ML_USER_ID
-        
+
         # Atualizar variáveis globais
         ML_ACCESS_TOKEN = access_token
         ML_REFRESH_TOKEN = refresh_token
         ML_USER_ID = user_id
-        
+
         # Atualizar no banco de dados
         try:
             user = User.query.filter_by(ml_user_id=user_id).first()
@@ -259,10 +242,10 @@ def update_system_tokens_internal(self, access_token, refresh_token, user_id):
                 add_debug_log("💾 Tokens atualizados no banco de dados")
             else:
                 add_debug_log("⚠️ Usuário não encontrado no banco para atualizar tokens")
-                
+
         except Exception as e:
             add_debug_log(f"❌ Erro ao atualizar tokens no banco: {e}")
-    
+
     def get_token_status(self):
         """Retorna status atual do token"""
         if not self.token_created_at or not self.token_expires_at:
@@ -272,16 +255,16 @@ def update_system_tokens_internal(self, access_token, refresh_token, user_id):
                 'time_remaining': 0,
                 'next_refresh': 0,
                 'auto_refresh_enabled': self.auto_refresh_enabled,
-                'is_refreshing': False
+                'is_refreshing': getattr(self, 'is_refreshing', False)
             }
-        
+
         current_time = time.time()
         time_remaining = max(0, self.token_expires_at - current_time)
-        
+
         # Calcular próxima renovação
         next_refresh_time = self.token_created_at + self.refresh_interval
         next_refresh = max(0, next_refresh_time - current_time)
-        
+
         # Determinar status
         if time_remaining <= 0:
             status = 'expired'
@@ -292,7 +275,7 @@ def update_system_tokens_internal(self, access_token, refresh_token, user_id):
         else:
             status = 'active'
             message = f'Token válido por {int(time_remaining//3600)}h {int((time_remaining%3600)//60)}min'
-        
+
         return {
             'status': status,
             'message': message,
@@ -301,29 +284,27 @@ def update_system_tokens_internal(self, access_token, refresh_token, user_id):
             'auto_refresh_enabled': self.auto_refresh_enabled,
             'is_refreshing': getattr(self, 'is_refreshing', False)
         }
-    
+
     def stop_auto_refresh(self):
         """Para o sistema de renovação automática"""
         if self.refresh_timer:
             self.refresh_timer.cancel()
             self.refresh_timer = None
             add_debug_log("⏹️ Sistema de auto-renovação parado")
-    
+
     def enable_auto_refresh(self):
         """Habilita renovação automática"""
         self.auto_refresh_enabled = True
         add_debug_log("✅ Auto-renovação habilitada")
-    
+
     def disable_auto_refresh(self):
         """Desabilita renovação automática"""
         self.auto_refresh_enabled = False
         self.stop_auto_refresh()
         add_debug_log("❌ Auto-renovação desabilitada")
-
-# Instância global do sistema de renovação automática
 auto_refresh_manager = AutoTokenRefresh()
 
-# ====== MULTI-CONTA: gerenciador de auto-refresh por usuário ======
+    # ====== MULTI-CONTA: gerenciador de auto-refresh por usuário ======
 
 class AutoTokenRefreshManager:
     def __init__(self):
@@ -936,6 +917,7 @@ def create_default_data():
 
 # ========== MONITORAMENTO CONTÍNUO ==========
 
+
 def monitor_questions():
     """Função de monitoramento contínuo de perguntas (multi-conta)."""
     while True:
@@ -985,11 +967,16 @@ def monitor_questions():
                                         )
                                         db.session.add(history)
                                 db.session.commit()
+                    except Exception as e:
+                        try:
+                            uid = getattr(u, "ml_user_id", None) or getattr(u, "id", "?")
+                        except Exception:
+                            uid = "?"
+                        add_debug_log(f"❌ monitor/{uid}: {e}")
             time.sleep(30)
         except Exception as e:
             add_debug_log(f"❌ Erro no monitoramento: {e}")
             time.sleep(30)
-
 
 # ========== SISTEMA DE RENOVAÇÃO MANUAL DE TOKENS ==========
 # Baseado no módulo modulo_renovacao_token_manual.py - 100% FUNCIONAL
@@ -1426,99 +1413,100 @@ def webhook_ml():
             data = request.get_json()
             
             if data and data.get('topic') == 'questions':
-            add_debug_log(f"📨 Notificação de pergunta recebida: {data}")
+                add_debug_log(f"📨 Notificação de pergunta recebida: {data}")
 
-            # Salvar log do webhook
-            webhook_log = WebhookLog(
-                topic=data.get('topic'),
-                resource=data.get('resource'),
-                user_id_ml=str(data.get('user_id')),
-                application_id=data.get('application_id'),
-                sent=datetime.fromisoformat(data.get('sent', '').replace('Z', '+00:00')) if data.get('sent') else None
-            )
-            db.session.add(webhook_log)
-            db.session.commit()
+                # Salvar log do webhook
+                webhook_log = WebhookLog(
+                    topic=data.get('topic'),
+                    resource=data.get('resource'),
+                    user_id_ml=str(data.get('user_id')),
+                    application_id=data.get('application_id'),
+                    sent=datetime.fromisoformat(data.get('sent', '').replace('Z', '+00:00')) if data.get('sent') else None
+                )
+                db.session.add(webhook_log)
+                db.session.commit()
 
-            resource = data.get('resource', '')
-            qid = resource.split('/')[-1] if resource else None
-            user_id_ml = str(data.get('user_id'))
+                resource = data.get('resource', '')
+                qid = resource.split('/')[-1] if resource else None
+                user_id_ml = str(data.get('user_id'))
 
-            def worker():
-                try:
-                    if not qid or not user_id_ml:
-                        add_debug_log("⚠️ Webhook sem qid ou user_id")
-                        return
-                    access_token, _rt = get_user_tokens_by_ml_id(user_id_ml)
-                    q = fetch_question_by_id_with_token(access_token, qid)
-                    if not q:
-                        qs = fetch_unanswered_questions_with_token(access_token, limit=50)
-                        for x in qs:
-                            if str(x.get("id")) == str(qid):
-                                q = x
-                                break
-                    if not q:
-                        add_debug_log(f"⚠️ Pergunta {qid} não disponível ainda; será capturada no próximo ciclo")
-                        return
-
-                    text = q.get('text', '')
-                    item_id = q.get('item_id', '')
-
-                    with app.app_context():
-                        user = User.query.filter_by(ml_user_id=user_id_ml).first()
-                        if not user:
-                            user = User(ml_user_id=user_id_ml, access_token=access_token, token_expires_at=get_local_time_utc() + timedelta(hours=6))
-                            db.session.add(user)
-                            db.session.commit()
-
-                        existing = Question.query.filter_by(ml_question_id=str(qid)).first()
-                        if existing and existing.is_answered:
-                            add_debug_log("⏭️ Pergunta já respondida")
+                def worker():
+                    try:
+                        if not qid or not user_id_ml:
+                            add_debug_log("⚠️ Webhook sem qid ou user_id")
+                            return
+                        access_token, _rt = get_user_tokens_by_ml_id(user_id_ml)
+                        q = fetch_question_by_id_with_token(access_token, qid)
+                        if not q:
+                            # fallback leve: tenta via listagem do próprio usuário
+                            qs = fetch_unanswered_questions_with_token(access_token, limit=50)
+                            for x in qs:
+                                if str(x.get("id")) == str(qid):
+                                    q = x
+                                    break
+                        if not q:
+                            add_debug_log(f"⚠️ Pergunta {qid} não disponível ainda; será capturada no próximo ciclo")
                             return
 
-                        question = existing or Question(
-                            ml_question_id=str(qid),
-                            user_id=user.id,
-                            item_id=item_id or "",
-                            question_text=text or "",
-                            is_answered=False
-                        )
-                        if not existing:
-                            db.session.add(question)
-                            db.session.flush()
+                        text = q.get('text', '')
+                        item_id = q.get('item_id', '')
 
-                        start_time = time.time()
-                        response_type = None
-                        keywords_matched = None
+                        with app.app_context():
+                            user = User.query.filter_by(ml_user_id=user_id_ml).first()
+                            if not user:
+                                user = User(ml_user_id=user_id_ml, access_token=access_token, token_expires_at=get_local_time_utc() + timedelta(hours=6))
+                                db.session.add(user)
+                                db.session.commit()
 
-                        auto_response, matched_keywords = find_auto_response(text or "")
-                        reply = auto_response or is_absence_time()
-                        if reply:
-                            if answer_question_ml_with_token(access_token, str(qid), reply):
-                                question.response_text = reply
-                                question.is_answered = True
-                                question.answered_automatically = True
-                                question.answered_at = get_local_time_utc()
-                                response_type = "auto" if auto_response else "absence"
-                                keywords_matched = matched_keywords
+                            existing = Question.query.filter_by(ml_question_id=str(qid)).first()
+                            if existing and existing.is_answered:
+                                add_debug_log("⏭️ Pergunta já respondida")
+                                return
 
-                        if response_type:
-                            history = ResponseHistory(
+                            question = existing or Question(
+                                ml_question_id=str(qid),
                                 user_id=user.id,
-                                question_id=question.id,
-                                response_type=response_type,
-                                keywords_matched=keywords_matched,
-                                response_time=time.time() - start_time
+                                item_id=item_id or "",
+                                question_text=text or "",
+                                is_answered=False
                             )
-                            db.session.add(history)
+                            if not existing:
+                                db.session.add(question)
+                                db.session.flush()
 
-                        db.session.commit()
-                        add_debug_log("✅ Webhook processado por ID com sucesso")
-                except Exception as e:
-                    add_debug_log(f"❌ Erro ao processar webhook/ID: {e}")
+                            start_time = time.time()
+                            response_type = None
+                            keywords_matched = None
 
-            threading.Thread(target=worker, daemon=True).start()
-            return jsonify({"status": "ok", "message": "notificação processada"})
-return jsonify({"status": "ok", "message": "webhook recebido"})
+                            auto_response, matched_keywords = find_auto_response(text or "")
+                            reply = auto_response or is_absence_time()
+                            if reply:
+                                if answer_question_ml_with_token(access_token, str(qid), reply):
+                                    question.response_text = reply
+                                    question.is_answered = True
+                                    question.answered_automatically = True
+                                    question.answered_at = get_local_time_utc()
+                                    response_type = "auto" if auto_response else "absence"
+                                    keywords_matched = matched_keywords
+
+                            if response_type:
+                                history = ResponseHistory(
+                                    user_id=user.id,
+                                    question_id=question.id,
+                                    response_type=response_type,
+                                    keywords_matched=keywords_matched,
+                                    response_time=time.time() - start_time
+                                )
+                                db.session.add(history)
+
+                            db.session.commit()
+                            add_debug_log("✅ Webhook processado por ID com sucesso")
+                    except Exception as e:
+                        add_debug_log(f"❌ Erro ao processar webhook/ID: {e}")
+
+                threading.Thread(target=worker, daemon=True).start()
+                return jsonify({"status": "ok", "message": "notificação processada"})
+            return jsonify({"status": "ok", "message": "webhook recebido"})
         
     except Exception as e:
         add_debug_log(f"❌ Erro no webhook: {e}")
