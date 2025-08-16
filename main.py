@@ -29,6 +29,31 @@ import sqlite3
 
 # ========== CONFIGURAÇÃO DA APLICAÇÃO ==========
 app = Flask(__name__)
+
+# ------------ Fallback lightweight HTML helpers (keep dashboard online even without full template set) ------------
+def create_base_template(title: str, content: str) -> str:
+    return f"""<!doctype html>
+<html lang="pt-br">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>{title}</title>
+  <style>
+    body{{font-family: system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Helvetica,Arial,sans-serif; margin:20px; color:#222;}}
+    .ok{{color:#0a7d00;font-weight:600}}
+    .card{{border:1px solid #e5e7eb; border-radius:12px; padding:16px; margin:12px 0; box-shadow:0 1px 3px rgba(0,0,0,.05);}}
+    .muted{{color:#6b7280;font-size:14px}}
+    .btn{{display:inline-block; padding:10px 14px; border-radius:8px; background:#111827; color:white; text-decoration:none}}
+  </style>
+</head>
+<body>
+  {content}
+</body>
+</html>"""
+
+def create_header(title: str) -> str:
+    return f"""<h2>{title}</h2><p class="muted">Online <span class="ok">●</span></p>"""
+# ------------------------------------------------------------------------------------------------------------------
 CORS(app)
 
 # ========== CONFIGURAÇÃO DO FUSO HORÁRIO ==========
