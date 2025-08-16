@@ -530,3 +530,20 @@ def fetch_question_by_id_with_token(access_token: str, qid: str, user_id_for_ref
     except Exception as e:
         add_debug_log(f"❌ Erro ao buscar pergunta {qid}: {e}")
     return None
+
+
+@app.route("/", methods=["GET"])
+def home():
+    return (
+        "<h2>Bot Mercado Livre</h2>"
+        "<p>Online ✅</p>"
+        "<ul>"
+        "<li>Webhook: <code>/api/ml/webhook</code></li>"
+        "<li>Health: <code>/health</code></li>"
+        "</ul>"
+    ), 200
+
+@app.route("/health", methods=["GET"])
+def health():
+    return jsonify({"status": "ok"}), 200
+
