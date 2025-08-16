@@ -236,20 +236,18 @@ class AutoTokenRefresh:
         
         # Atualizar no banco de dados
         try:
-            with app.app_context():
-                user = User.query.filter_by(ml_user_id=user_id).first()
-                if user:
-                    user.access_token = access_token
-                    user.refresh_token = refresh_token
-                    user.token_expires_at = datetime.utcnow() + timedelta(hours=6)
-                    user.updated_at = get_local_time_utc()
-                    db.session.commit()
-                    add_debug_log("💾 Tokens atualizados no banco de dados")
-                else:
-                    add_debug_log("⚠️ Usuário não encontrado no banco para atualizar tokens")
+            user = User.query.filter_by(ml_user_id=user_id).first()
+            if user:
+                user.access_token = access_token
+                user.refresh_token = refresh_token
+                user.token_expires_at = datetime.utcnow() + timedelta(hours=6)
+                user.updated_at = get_local_time_utc()
+                db.session.commit()
+                add_debug_log("💾 Tokens atualizados no banco de dados")
+            else:
+                add_debug_log("⚠️ Usuário não encontrado no banco para atualizar tokens")
+                
         except Exception as e:
-            add_debug_log(f"❌ Erro ao atualizar tokens no banco: {e}")
-
             add_debug_log(f"❌ Erro ao atualizar tokens no banco: {e}")
     
     def get_token_status(self):
@@ -2904,9 +2902,3 @@ if __name__ == '__main__':
         debug=False,
         threaded=True
     )
-
-
-
-@app.route("/health", methods=["GET"])
-def health():
-    return jsonify({"status": "ok"}), 200
