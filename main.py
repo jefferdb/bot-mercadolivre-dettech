@@ -51,7 +51,10 @@ def create_base_template(title: str, content: str) -> str:
 </body>
 </html>"""
 
-def create_header(title: str) -> str:
+
+def create_header(title: str, subtitle: str = None) -> str:
+    if subtitle:
+        return f"""<h2>{title}</h2><p class="muted">{subtitle} <span class="ok">●</span></p>"""
     return f"""<h2>{title}</h2><p class="muted">Online <span class="ok">●</span></p>"""
 # ------------------------------------------------------------------------------------------------------------------
 CORS(app)
