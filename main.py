@@ -29,34 +29,6 @@ import sqlite3
 
 # ========== CONFIGURAÇÃO DA APLICAÇÃO ==========
 app = Flask(__name__)
-
-# ------------ Fallback lightweight HTML helpers (keep dashboard online even without full template set) ------------
-def create_base_template(title: str, content: str) -> str:
-    return f"""<!doctype html>
-<html lang="pt-br">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>{title}</title>
-  <style>
-    body{{font-family: system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Helvetica,Arial,sans-serif; margin:20px; color:#222;}}
-    .ok{{color:#0a7d00;font-weight:600}}
-    .card{{border:1px solid #e5e7eb; border-radius:12px; padding:16px; margin:12px 0; box-shadow:0 1px 3px rgba(0,0,0,.05);}}
-    .muted{{color:#6b7280;font-size:14px}}
-    .btn{{display:inline-block; padding:10px 14px; border-radius:8px; background:#111827; color:white; text-decoration:none}}
-  </style>
-</head>
-<body>
-  {content}
-</body>
-</html>"""
-
-
-def create_header(title: str, subtitle: str = None) -> str:
-    if subtitle:
-        return f"""<h2>{title}</h2><p class="muted">{subtitle} <span class="ok">●</span></p>"""
-    return f"""<h2>{title}</h2><p class="muted">Online <span class="ok">●</span></p>"""
-# ------------------------------------------------------------------------------------------------------------------
 CORS(app)
 
 # ========== CONFIGURAÇÃO DO FUSO HORÁRIO ==========
@@ -124,157 +96,153 @@ import threading
 import time
 
 class AutoTokenRefresh:
-    """Sistema de renovação automática de tokens baseado em tempo"""
-    
+    """Sistema de renovação automática de tokens baseado em tempo (multi-conta-ready)."""
+
     def __init__(self):
+        self.ml_user_id = None  # identifica o usuário dono do token
         self.refresh_timer = None
         self.is_refreshing = False
         self.token_created_at = None
         self.token_expires_at = None
         self.auto_refresh_enabled = True
         self.refresh_interval = 5 * 3600  # 5 horas em segundos
-        
+
     def start_auto_refresh(self, expires_in=21600):
         """
-        Inicia sistema de renovação automática
-        Args:
-            expires_in: Tempo de expiração em segundos (padrão: 6 horas)
+        Inicia sistema de renovação automática.
+        :param expires_in: Tempo de expiração do access token em segundos (padrão: 6 horas).
         """
         if not self.auto_refresh_enabled:
             add_debug_log("🔄 Auto-renovação desabilitada")
             return
-            
+
         # Cancelar timer anterior se existir
         if self.refresh_timer:
             self.refresh_timer.cancel()
             add_debug_log("⏹️ Timer anterior cancelado")
-        
+
         # Calcular quando renovar (5 horas = 18000 segundos)
-        refresh_delay = min(self.refresh_interval, max(expires_in - 3600, 300))  # Min 5 minutos
-        
+        refresh_delay = min(self.refresh_interval, max(expires_in - 3600, 300))  # mínimo 5 minutos
+
         # Atualizar timestamps
         self.token_created_at = time.time()
         self.token_expires_at = self.token_created_at + expires_in
-        
+
         # Agendar renovação
         self.refresh_timer = threading.Timer(refresh_delay, self.auto_refresh)
         self.refresh_timer.start()
-        
+
         # Log detalhado
         refresh_time = datetime.fromtimestamp(self.token_created_at + refresh_delay)
         expires_time = datetime.fromtimestamp(self.token_expires_at)
-        
         add_debug_log(f"🕐 Auto-renovação agendada para {refresh_delay}s ({refresh_time.strftime('%H:%M:%S')})")
         add_debug_log(f"⏰ Token expira em: {expires_time.strftime('%H:%M:%S')}")
-        
+
     def auto_refresh(self):
-        """Executa renovação automática do token"""
+        """Executa renovação automática do token."""
         if self.is_refreshing:
             add_debug_log("⚠️ Renovação já em andamento, ignorando")
             return
-            
+
         self.is_refreshing = True
-        
         try:
             add_debug_log("🔄 Iniciando renovação automática de token...")
-            
-            # Usar função existente de renovação
             success, result = self.process_refresh_token_internal()
-            
+
             if success:
-                # Atualizar tokens no sistema
                 self.update_system_tokens_internal(
                     result['access_token'],
-                    result['refresh_token'],
-                    result['user_id']
+                    result.get('refresh_token', ''),
+                    result.get('user_id')
                 )
-                
-                # Agendar próxima renovação
                 self.start_auto_refresh(result.get('expires_in', 21600))
                 add_debug_log("✅ Renovação automática concluída com sucesso")
-                
             else:
-                # Tentar novamente em 10 minutos
-                retry_delay = 600
+                retry_delay = 600  # 10 min
                 self.refresh_timer = threading.Timer(retry_delay, self.auto_refresh)
                 self.refresh_timer.start()
                 add_debug_log(f"❌ Falha na renovação automática, tentando novamente em {retry_delay//60} min")
-                
         except Exception as e:
             add_debug_log(f"❌ Erro na renovação automática: {e}")
-            # Tentar novamente em 5 minutos
-            retry_delay = 300
+            retry_delay = 300  # 5 min
             self.refresh_timer = threading.Timer(retry_delay, self.auto_refresh)
             self.refresh_timer.start()
             add_debug_log(f"🔄 Reagendando tentativa em {retry_delay//60} min")
-            
         finally:
             self.is_refreshing = False
-    
+
     def process_refresh_token_internal(self):
-        """Processa renovação usando refresh token atual"""
-        global ML_REFRESH_TOKEN
-        
-        if not ML_REFRESH_TOKEN:
-            return False, {'error': 'Refresh token não disponível'}
-        
+        """Processa renovação usando refresh token do usuário configurado (ou global como fallback)."""
+        rt = None
+        uid = None
         try:
+            if self.ml_user_id:
+                with app.app_context():
+                    u = User.query.filter_by(ml_user_id=str(self.ml_user_id)).first()
+                    if u and u.refresh_token:
+                        rt = u.refresh_token
+                        uid = str(self.ml_user_id)
+            if not rt:
+                # fallback compatível com o comportamento antigo
+                rt = ML_REFRESH_TOKEN
+                uid = ML_USER_ID
+
+            if not rt:
+                return False, {'error': 'Refresh token não disponível'}
+
             url = "https://api.mercadolibre.com/oauth/token"
             data = {
                 'grant_type': 'refresh_token',
                 'client_id': ML_CLIENT_ID,
                 'client_secret': ML_CLIENT_SECRET,
-                'refresh_token': ML_REFRESH_TOKEN
+                'refresh_token': rt
             }
-            
+
             add_debug_log("🔄 Enviando requisição de renovação...")
             response = requests.post(url, data=data, timeout=30)
-            
+
             if response.status_code == 200:
                 token_data = response.json()
-                
                 result = {
                     'success': True,
                     'access_token': token_data['access_token'],
                     'refresh_token': token_data.get('refresh_token', ''),
-                    'user_id': str(token_data['user_id']),
+                    'user_id': str(token_data.get('user_id', uid)),
                     'expires_in': token_data.get('expires_in', 21600)
                 }
-                
                 add_debug_log("✅ Renovação via refresh token bem-sucedida")
                 return True, result
-                
-            else:
-                error_msg = f"Erro {response.status_code}: {response.text}"
-                add_debug_log(f"❌ Falha na renovação: {error_msg}")
-                return False, {'error': error_msg}
-                
+
+            error_msg = f"Erro {response.status_code}: {response.text}"
+            add_debug_log(f"❌ Falha na renovação: {error_msg}")
+            return False, {'error': error_msg}
+
         except Exception as e:
             add_debug_log(f"❌ Erro na requisição de renovação: {e}")
             return False, {'error': str(e)}
-    
+
     def update_system_tokens_internal(self, access_token, refresh_token, user_id):
         """Atualiza tokens no sistema"""
         global ML_ACCESS_TOKEN, ML_REFRESH_TOKEN, ML_USER_ID
-        
+
         # Atualizar variáveis globais
         ML_ACCESS_TOKEN = access_token
         ML_REFRESH_TOKEN = refresh_token
         ML_USER_ID = user_id
-        
-        # Atualizar no banco de dados (precisa de app_context se chamado por thread/Timer)
+
+        # Atualizar no banco de dados
         try:
-            with app.app_context():
-                user = User.query.filter_by(ml_user_id=user_id).first()
-                if user:
-                    user.access_token = access_token
-                    user.refresh_token = refresh_token
-                    user.token_expires_at = datetime.utcnow() + timedelta(hours=6)
-                    user.updated_at = get_local_time_utc()
-                    db.session.commit()
-                    add_debug_log("💾 Tokens atualizados no banco de dados")
-                else:
-                    add_debug_log("⚠️ Usuário não encontrado no banco para atualizar tokens")
+            user = User.query.filter_by(ml_user_id=user_id).first()
+            if user:
+                user.access_token = access_token
+                user.refresh_token = refresh_token
+                user.token_expires_at = datetime.utcnow() + timedelta(hours=6)
+                user.updated_at = get_local_time_utc()
+                db.session.commit()
+                add_debug_log("💾 Tokens atualizados no banco de dados")
+            else:
+                add_debug_log("⚠️ Usuário não encontrado no banco para atualizar tokens")
+
         except Exception as e:
             add_debug_log(f"❌ Erro ao atualizar tokens no banco: {e}")
 
@@ -287,16 +255,16 @@ class AutoTokenRefresh:
                 'time_remaining': 0,
                 'next_refresh': 0,
                 'auto_refresh_enabled': self.auto_refresh_enabled,
-                'is_refreshing': False
+                'is_refreshing': getattr(self, 'is_refreshing', False)
             }
-        
+
         current_time = time.time()
         time_remaining = max(0, self.token_expires_at - current_time)
-        
+
         # Calcular próxima renovação
         next_refresh_time = self.token_created_at + self.refresh_interval
         next_refresh = max(0, next_refresh_time - current_time)
-        
+
         # Determinar status
         if time_remaining <= 0:
             status = 'expired'
@@ -307,7 +275,7 @@ class AutoTokenRefresh:
         else:
             status = 'active'
             message = f'Token válido por {int(time_remaining//3600)}h {int((time_remaining%3600)//60)}min'
-        
+
         return {
             'status': status,
             'message': message,
@@ -316,27 +284,42 @@ class AutoTokenRefresh:
             'auto_refresh_enabled': self.auto_refresh_enabled,
             'is_refreshing': getattr(self, 'is_refreshing', False)
         }
-    
+
     def stop_auto_refresh(self):
         """Para o sistema de renovação automática"""
         if self.refresh_timer:
             self.refresh_timer.cancel()
             self.refresh_timer = None
             add_debug_log("⏹️ Sistema de auto-renovação parado")
-    
+
     def enable_auto_refresh(self):
         """Habilita renovação automática"""
         self.auto_refresh_enabled = True
         add_debug_log("✅ Auto-renovação habilitada")
-    
+
     def disable_auto_refresh(self):
         """Desabilita renovação automática"""
         self.auto_refresh_enabled = False
         self.stop_auto_refresh()
         add_debug_log("❌ Auto-renovação desabilitada")
-
-# Instância global do sistema de renovação automática
 auto_refresh_manager = AutoTokenRefresh()
+
+    # ====== MULTI-CONTA: gerenciador de auto-refresh por usuário ======
+
+class AutoTokenRefreshManager:
+    def __init__(self):
+        self.instances = {}  # ml_user_id -> AutoTokenRefresh
+
+    def get(self, ml_user_id: str) -> AutoTokenRefresh:
+        key = str(ml_user_id)
+        if key not in self.instances:
+            inst = AutoTokenRefresh()
+            inst.ml_user_id = key
+            self.instances[key] = inst
+        return self.instances[key]
+
+multi_refresh = AutoTokenRefreshManager()
+
 
 def initialize_auto_refresh():
     """Inicializa sistema de renovação automática baseado no token atual"""
@@ -490,6 +473,63 @@ class WebhookLog(db.Model):
     attempts = db.Column(db.Integer, default=1)
     sent = db.Column(db.DateTime)
     received = db.Column(db.DateTime, default=get_local_time_utc)
+
+
+
+# ====== MULTI-CONTA: utilidades de tokens por usuário ======
+def get_user_tokens_by_ml_id(ml_user_id: str):
+    """Retorna (access_token, refresh_token) do usuário no banco."""
+    with app.app_context():
+        u = User.query.filter_by(ml_user_id=str(ml_user_id)).first()
+        if not u or not u.access_token:
+            raise RuntimeError(f"Sem tokens salvos para o user {ml_user_id}")
+        return u.access_token, u.refresh_token
+
+def answer_question_ml_with_token(access_token: str, question_id: str, answer_text: str) -> bool:
+    """Variante que responde usando um access token específico (multi-conta)."""
+    url = "https://api.mercadolibre.com/answers"
+    headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
+    data = {"question_id": int(question_id), "text": answer_text}
+    try:
+        add_debug_log(f"📤 Enviando resposta (user token) para pergunta {question_id}")
+        r = requests.post(url, headers=headers, json=data, timeout=30)
+        if r.status_code == 200:
+            add_debug_log("✅ Resposta enviada com sucesso!")
+            return True
+        add_debug_log(f"❌ Erro ao enviar resposta: {r.status_code}: {r.text}")
+    except Exception as e:
+        add_debug_log(f"❌ Erro na requisição: {e}")
+    return False
+
+def fetch_question_by_id_with_token(access_token: str, qid: str):
+    """Busca uma pergunta diretamente por ID (evita buracos da listagem)."""
+    url = f"https://api.mercadolibre.com/questions/{qid}"
+    headers = {"Authorization": f"Bearer {access_token}"}
+    try:
+        r = requests.get(url, headers=headers, timeout=30)
+        if r.status_code == 200:
+            return r.json()
+        add_debug_log(f"❌ Erro ao buscar pergunta {qid}: {r.status_code}: {r.text}")
+    except Exception as e:
+        add_debug_log(f"❌ Erro ao buscar pergunta {qid}: {e}")
+    return None
+
+def fetch_unanswered_questions_with_token(access_token: str, limit: int = 50):
+    """Listagem de perguntas não respondidas para um token específico (multi-conta)."""
+    url = "https://api.mercadolibre.com/my/received_questions/search"
+    headers = {"Authorization": f"Bearer {access_token}"}
+    params = {"status": "UNANSWERED", "limit": limit}
+    try:
+        add_debug_log("📥 Buscando perguntas não respondidas (user token)...")
+        r = requests.get(url, headers=headers, params=params, timeout=30)
+        if r.status_code == 200:
+            qs = r.json().get("questions", [])
+            add_debug_log(f"   Encontradas: {len(qs)} perguntas")
+            return qs
+        add_debug_log(f"❌ Erro na listagem: {r.status_code}: {r.text}")
+    except Exception as e:
+        add_debug_log(f"❌ Erro na listagem: {e}")
+    return []
 
 # ========== VARIÁVEIS GLOBAIS DE CONTROLE ==========
 _initialized = False
@@ -876,17 +916,67 @@ def create_default_data():
         add_debug_log(f"❌ Erro ao criar dados padrão: {e}")
 
 # ========== MONITORAMENTO CONTÍNUO ==========
+
+
 def monitor_questions():
-    """Função de monitoramento contínuo de perguntas"""
+    """Função de monitoramento contínuo de perguntas (multi-conta)."""
     while True:
         try:
             if _initialized:
-                process_questions()
-            time.sleep(30)  # Verificar a cada 30 segundos
+                with app.app_context():
+                    users = User.query.all()
+                for u in users:
+                    try:
+                        qs = fetch_unanswered_questions_with_token(u.access_token, limit=50)
+                        if not qs:
+                            continue
+                        for q in qs:
+                            qid = str(q.get("id"))
+                            text = q.get("text", "")
+                            item_id = q.get("item_id", "")
+                            with app.app_context():
+                                existing = Question.query.filter_by(ml_question_id=qid).first()
+                                if existing and existing.is_answered:
+                                    continue
+                                if not existing:
+                                    question = Question(
+                                        ml_question_id=qid,
+                                        user_id=u.id,
+                                        item_id=item_id or "",
+                                        question_text=text or "",
+                                        is_answered=False
+                                    )
+                                    db.session.add(question)
+                                    db.session.flush()
+                                else:
+                                    question = existing
+                                auto_response, matched_keywords = find_auto_response(text or "")
+                                reply = auto_response or is_absence_time()
+                                if reply:
+                                    if answer_question_ml_with_token(u.access_token, qid, reply):
+                                        question.response_text = reply
+                                        question.is_answered = True
+                                        question.answered_automatically = True
+                                        question.answered_at = get_local_time_utc()
+                                        history = ResponseHistory(
+                                            user_id=u.id,
+                                            question_id=question.id,
+                                            response_type=("auto" if auto_response else "absence"),
+                                            keywords_matched=(matched_keywords),
+                                            response_time=0.0
+                                        )
+                                        db.session.add(history)
+                                db.session.commit()
+                    except Exception as e:
+                        try:
+                            uid = getattr(u, "ml_user_id", None) or getattr(u, "id", "?")
+                        except Exception:
+                            uid = "?"
+                        add_debug_log(f"❌ monitor/{uid}: {e}")
+            time.sleep(30)
         except Exception as e:
             add_debug_log(f"❌ Erro no monitoramento: {e}")
             time.sleep(30)
-
 
 # ========== SISTEMA DE RENOVAÇÃO MANUAL DE TOKENS ==========
 # Baseado no módulo modulo_renovacao_token_manual.py - 100% FUNCIONAL
@@ -1035,45 +1125,37 @@ def get_user_info(access_token):
         add_debug_log(f"❌ Erro ao buscar info do usuário: {e}")
         return None
 
+
 def update_system_tokens(access_token, refresh_token, user_id):
-    """
-    Atualiza tokens no sistema (variáveis globais e banco)
-    """
+    """Atualiza tokens no sistema (globais + DB) e inicia auto-refresh por usuário"""
     try:
         add_debug_log("🔄 Atualizando tokens no sistema...")
-        
-        # Atualizar variáveis globais
         global ML_ACCESS_TOKEN, ML_REFRESH_TOKEN, ML_USER_ID
         ML_ACCESS_TOKEN = access_token
         ML_REFRESH_TOKEN = refresh_token
         ML_USER_ID = user_id
-        
-        # Atualizar no banco
         with app.app_context():
             user = User.query.filter_by(ml_user_id=user_id).first()
             if not user:
                 user = User(ml_user_id=user_id)
                 db.session.add(user)
-            
             user.access_token = access_token
             user.refresh_token = refresh_token
             user.token_expires_at = get_local_time_utc() + timedelta(hours=6)
             user.updated_at = get_local_time_utc()
-            
             db.session.commit()
-        
-        add_debug_log(f"✅ Sistema atualizado com novos tokens!")
+        inst = multi_refresh.get(str(user_id))
+        inst.update_system_tokens_internal(access_token, refresh_token, str(user_id))
+        inst.start_auto_refresh(21600)
+        add_debug_log("✅ Sistema atualizado com novos tokens!")
         add_debug_log(f"🔑 Access Token: {access_token[:20]}...")
         add_debug_log(f"🔄 Refresh Token: {refresh_token[:20]}...")
         add_debug_log(f"👤 User ID: {user_id}")
-        
         return True, "Tokens atualizados com sucesso"
-        
     except Exception as e:
         error_msg = f"Erro ao atualizar tokens: {str(e)}"
         add_debug_log(f"❌ {error_msg}")
         return False, error_msg
-
 # ========== ROTAS FLASK PARA RENOVAÇÃO DE TOKENS ==========
 
 @app.route('/renovar-tokens')
@@ -1280,126 +1362,498 @@ def api_process_code_flexible():
 
 @app.route('/api/ml/webhook', methods=['GET', 'POST'])
 def webhook_ml():
-    
-    if request.method == 'GET':
-        # Verificar se há código de autorização na URL
-        code = request.args.get('code')
-        if code:
-            add_debug_log(f"🔗 Código recebido via webhook GET: {code}")
-            
-            # Processar código automaticamente
-            success, result = process_auth_code_flexible(code)
-            
-            if success:
-                update_system_tokens(
-                    result['access_token'],
-                    result['refresh_token'],
-                    result['user_id']
-                )
+    """Webhook para receber códigos de autorização e notificações do ML"""
+    try:
+        if request.method == 'GET':
+            # Verificar se há código de autorização na URL
+            code = request.args.get('code')
+            if code:
+                add_debug_log(f"🔗 Código recebido via webhook GET: {code}")
                 
-                return f"""
-                <!DOCTYPE html>
-                <html>
-                <head><title>Autorização Concluída</title></head>
-                <body>
-                    <h1>✅ Tokens Atualizados com Sucesso!</h1>
-                    <p><strong>User ID:</strong> {result['user_id']}</p>
-                    <p><strong>Token:</strong> {code}</p>
-                    <p>O sistema já está usando os novos tokens.</p>
-                    <p><a href="/">← Voltar ao Dashboard</a></p>
-                </body>
-                </html>
-                """
-    elif request.method == 'POST':
-        try:
-            payload = request.get_json(force=True, silent=True) or {}
-            add_debug_log(f"📨 Notificação recebida: {payload}")
-            topic = payload.get("topic")
-            resource = payload.get("resource", "") or ""
-            user_id_ml = str(payload.get("user_id") or payload.get("user") or "")
-            if topic != "questions" or not resource.startswith("/questions/"):
-                add_debug_log("ℹ️ Webhook ignorado (topic diferente de 'questions' ou resource inválido)")
-                return jsonify({"ok": True}), 200
-            try:
-                qid = resource.strip("/").split("/")[1]
-            except Exception:
-                add_debug_log(f"⚠️ Resource inesperado: {resource}")
-                return jsonify({"ok": True}), 200
-            with app.app_context():
-                user = User.query.filter_by(ml_user_id=user_id_ml).first()
-            if not user or not (user.access_token or user.refresh_token):
-                add_debug_log(f"⚠️ Sem token armazenado para user {user_id_ml}")
-                return jsonify({"ok": True}), 200
-            access_token = user.access_token
-            q = None
-            try:
-                q = fetch_question_by_id_with_token(access_token, qid, user_id_for_refresh=user_id_ml)
-            except TypeError:
-                q = fetch_question_by_id_with_token(access_token, qid)
-            if not q:
-                add_debug_log(f"⚠️ Pergunta {qid} não disponível ainda; tentar no próximo ciclo")
-                return jsonify({"ok": True}), 200
-            text = q.get("text") or ""
-            item_id = q.get("item_id") or ""
-            seller_id = fetch_item_seller_id(access_token, item_id)
-            if seller_id and str(seller_id) != str(user_id_ml):
-                add_debug_log(f"⛔ Ignorado: user {user_id_ml} não é dono do item {item_id} (seller_id={seller_id})")
-                return jsonify({"ok": True}), 200
-            with app.app_context():
-                existing = Question.query.filter_by(ml_question_id=str(qid)).first()
-                if existing and existing.is_answered:
-                    add_debug_log("⏭️ Pergunta já respondida")
-                    return jsonify({"ok": True}), 200
-                if existing:
-                    question = existing
+                # Processar código automaticamente
+                success, result = process_auth_code_flexible(code)
+                
+                if success:
+                    update_system_tokens(
+                        result['access_token'],
+                        result['refresh_token'],
+                        result['user_id']
+                    )
+                    
+                    return f"""
+                    <!DOCTYPE html>
+                    <html>
+                    <head><title>Autorização Concluída</title></head>
+                    <body>
+                        <h1>✅ Tokens Atualizados com Sucesso!</h1>
+                        <p><strong>User ID:</strong> {result['user_id']}</p>
+                        <p><strong>Token:</strong> {code}</p>
+                        <p>O sistema já está usando os novos tokens.</p>
+                        <p><a href="/">← Voltar ao Dashboard</a></p>
+                    </body>
+                    </html>
+                    """
                 else:
-                    try:
-                        question = Question(
-                            ml_question_id=str(qid),
-                            user_id=user.id,
-                            item_id=item_id or "",
-                            question_text=text,
-                            is_answered=False
-                        )
-                        db.session.add(question)
-                        db.session.flush()
-                    except Exception:
-                        db.session.rollback()
-                        question = Question.query.filter_by(ml_question_id=str(qid)).first()
-                        if not question:
-                            raise
-            try:
-                reply_text = build_reply_text(text, item_id=item_id)
-            except TypeError:
-                reply_text = build_reply_text(text)
-            if not reply_text:
-                add_debug_log("ℹ️ Sem resposta aplicável pelas regras (não enviar)")
-                return jsonify({"ok": True}), 200
-            sent = False
-            try:
-                sent = answer_question_ml_with_token(user.access_token, qid, reply_text, user_id_for_refresh=user_id_ml)
-            except TypeError:
-                sent = answer_question_ml_with_token(user.access_token, qid, reply_text)
-            if not sent:
-                add_debug_log("❌ Erro ao enviar resposta (ver logs do endpoint ML)")
-                return jsonify({"ok": False}), 200
-            with app.app_context():
-                question.response_text = reply_text
-                question.is_answered = True
-                question.answered_automatically = True
-                question.answered_at = datetime.utcnow()
-                try:
-                    db.session.commit()
-                except Exception:
-                    db.session.rollback()
-            add_debug_log("✅ Webhook processado por ID com sucesso")
-            return jsonify({"ok": True}), 200
-        except Exception as e:
-            add_debug_log(f"❌ Erro no webhook: {e}")
-            return jsonify({"ok": False, "error": str(e)}), 200
-    else:
-        return jsonify({"message": "webhook funcionando!", "status": "webhook_active"})
+                    return f"""
+                    <!DOCTYPE html>
+                    <html>
+                    <head><title>Erro na Autorização</title></head>
+                    <body>
+                        <h1>❌ Erro na Autorização</h1>
+                        <p>{result.get('message', 'Erro desconhecido')}</p>
+                        <p><a href="/renovar-tokens">← Tentar Novamente</a></p>
+                    </body>
+                    </html>
+                    """
+            else:
+                return jsonify({"message": "webhook funcionando!", "status": "webhook_active"})
+        
+        elif request.method == 'POST':
+            # Processar notificação do ML
+            data = request.get_json()
+            
+            if data and data.get('topic') == 'questions':
+                add_debug_log(f"📨 Notificação de pergunta recebida: {data}")
 
+                # Salvar log do webhook
+                webhook_log = WebhookLog(
+                    topic=data.get('topic'),
+                    resource=data.get('resource'),
+                    user_id_ml=str(data.get('user_id')),
+                    application_id=data.get('application_id'),
+                    sent=datetime.fromisoformat(data.get('sent', '').replace('Z', '+00:00')) if data.get('sent') else None
+                )
+                db.session.add(webhook_log)
+                db.session.commit()
+
+                resource = data.get('resource', '')
+                qid = resource.split('/')[-1] if resource else None
+                user_id_ml = str(data.get('user_id'))
+
+                def worker():
+                    try:
+                        if not qid or not user_id_ml:
+                            add_debug_log("⚠️ Webhook sem qid ou user_id")
+                            return
+                        access_token, _rt = get_user_tokens_by_ml_id(user_id_ml)
+                        q = fetch_question_by_id_with_token(access_token, qid)
+                        if not q:
+                            # fallback leve: tenta via listagem do próprio usuário
+                            qs = fetch_unanswered_questions_with_token(access_token, limit=50)
+                            for x in qs:
+                                if str(x.get("id")) == str(qid):
+                                    q = x
+                                    break
+                        if not q:
+                            add_debug_log(f"⚠️ Pergunta {qid} não disponível ainda; será capturada no próximo ciclo")
+                            return
+
+                        text = q.get('text', '')
+                        item_id = q.get('item_id', '')
+
+                        with app.app_context():
+                            user = User.query.filter_by(ml_user_id=user_id_ml).first()
+                            if not user:
+                                user = User(ml_user_id=user_id_ml, access_token=access_token, token_expires_at=get_local_time_utc() + timedelta(hours=6))
+                                db.session.add(user)
+                                db.session.commit()
+
+                            existing = Question.query.filter_by(ml_question_id=str(qid)).first()
+                            if existing and existing.is_answered:
+                                add_debug_log("⏭️ Pergunta já respondida")
+                                return
+
+                            question = existing or Question(
+                                ml_question_id=str(qid),
+                                user_id=user.id,
+                                item_id=item_id or "",
+                                question_text=text or "",
+                                is_answered=False
+                            )
+                            if not existing:
+                                db.session.add(question)
+                                db.session.flush()
+
+                            start_time = time.time()
+                            response_type = None
+                            keywords_matched = None
+
+                            auto_response, matched_keywords = find_auto_response(text or "")
+                            reply = auto_response or is_absence_time()
+                            if reply:
+                                if answer_question_ml_with_token(access_token, str(qid), reply):
+                                    question.response_text = reply
+                                    question.is_answered = True
+                                    question.answered_automatically = True
+                                    question.answered_at = get_local_time_utc()
+                                    response_type = "auto" if auto_response else "absence"
+                                    keywords_matched = matched_keywords
+
+                            if response_type:
+                                history = ResponseHistory(
+                                    user_id=user.id,
+                                    question_id=question.id,
+                                    response_type=response_type,
+                                    keywords_matched=keywords_matched,
+                                    response_time=time.time() - start_time
+                                )
+                                db.session.add(history)
+
+                            db.session.commit()
+                            add_debug_log("✅ Webhook processado por ID com sucesso")
+                    except Exception as e:
+                        add_debug_log(f"❌ Erro ao processar webhook/ID: {e}")
+
+                threading.Thread(target=worker, daemon=True).start()
+                return jsonify({"status": "ok", "message": "notificação processada"})
+            return jsonify({"status": "ok", "message": "webhook recebido"})
+        
+    except Exception as e:
+        add_debug_log(f"❌ Erro no webhook: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+# ========== LAYOUT MINIMALISTA E SISTEMA DE HISTÓRICO ==========
+# Baseado nos módulos modulo_layout_minimalista.py e modulo_historico_respostas.py
+
+# CSS Base para todas as páginas
+BASE_CSS = """
+* { 
+    margin: 0; 
+    padding: 0; 
+    box-sizing: border-box; 
+}
+
+body { 
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+    background: #f8f9fa; 
+    line-height: 1.6;
+}
+
+.container { 
+    max-width: 1200px; 
+    margin: 0 auto; 
+    padding: 20px; 
+}
+
+/* Header principal */
+.header { 
+    background: linear-gradient(135deg, #3483fa, #2968c8); 
+    color: white; 
+    padding: 30px; 
+    border-radius: 12px; 
+    margin-bottom: 30px; 
+    text-align: center;
+}
+
+.header h1 { 
+    font-size: 2.5em; 
+    margin-bottom: 10px; 
+    font-weight: 600;
+}
+
+.header p { 
+    font-size: 1.2em; 
+    opacity: 0.9; 
+}
+
+/* Navegação */
+.nav { 
+    margin-bottom: 30px; 
+}
+
+.nav a { 
+    display: inline-block; 
+    padding: 12px 24px; 
+    background: #3483fa; 
+    color: white; 
+    text-decoration: none; 
+    border-radius: 8px; 
+    margin-right: 10px; 
+    margin-bottom: 10px;
+    font-weight: 500;
+    transition: all 0.3s ease;
+}
+
+.nav a:hover { 
+    background: #2968c8; 
+    transform: translateY(-1px);
+}
+
+.nav a.active { 
+    background: #28a745; 
+}
+
+/* Grid de estatísticas */
+.stats { 
+    display: grid; 
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); 
+    gap: 20px; 
+    margin-bottom: 30px; 
+}
+
+.stat-card { 
+    background: white; 
+    padding: 25px; 
+    border-radius: 12px; 
+    box-shadow: 0 4px 15px rgba(0,0,0,0.08); 
+    text-align: center;
+    transition: transform 0.3s ease;
+}
+
+.stat-card:hover {
+    transform: translateY(-2px);
+}
+
+.stat-number { 
+    font-size: 2.5em; 
+    font-weight: bold; 
+    color: #3483fa; 
+    margin-bottom: 10px;
+}
+
+.stat-label { 
+    color: #666; 
+    font-size: 1.1em;
+}
+
+/* Cards gerais */
+.card { 
+    background: white; 
+    padding: 25px; 
+    border-radius: 12px; 
+    box-shadow: 0 4px 15px rgba(0,0,0,0.08); 
+    margin-bottom: 20px; 
+}
+
+.card h3 { 
+    color: #333; 
+    margin-bottom: 20px; 
+    font-size: 1.4em;
+}
+
+/* Botões */
+.btn { 
+    display: inline-block; 
+    padding: 10px 20px; 
+    background: #3483fa; 
+    color: white; 
+    text-decoration: none; 
+    border-radius: 6px; 
+    border: none; 
+    cursor: pointer; 
+    font-size: 14px;
+    font-weight: 500;
+    transition: all 0.3s ease;
+}
+
+.btn:hover { 
+    background: #2968c8; 
+    transform: translateY(-1px);
+}
+
+.btn-success { 
+    background: #28a745; 
+}
+
+.btn-success:hover { 
+    background: #218838; 
+}
+
+.btn-warning { 
+    background: #ffc107; 
+    color: #212529; 
+}
+
+.btn-warning:hover { 
+    background: #e0a800; 
+}
+
+.btn-danger { 
+    background: #dc3545; 
+}
+
+.btn-danger:hover { 
+    background: #c82333; 
+}
+
+/* Tabelas */
+.table { 
+    width: 100%; 
+    border-collapse: collapse; 
+    margin-top: 20px;
+}
+
+.table th, .table td { 
+    padding: 12px; 
+    text-align: left; 
+    border-bottom: 1px solid #ddd; 
+}
+
+.table th { 
+    background: #f8f9fa; 
+    font-weight: 600;
+    color: #333;
+}
+
+.table tr:hover { 
+    background: #f8f9fa; 
+}
+
+/* Formulários */
+.form-group { 
+    margin-bottom: 20px; 
+}
+
+.form-group label { 
+    display: block; 
+    margin-bottom: 8px; 
+    font-weight: 600;
+    color: #333;
+}
+
+.form-group input, .form-group textarea, .form-group select { 
+    width: 100%; 
+    padding: 12px; 
+    border: 1px solid #ddd; 
+    border-radius: 6px; 
+    font-size: 14px;
+}
+
+.form-group input:focus, .form-group textarea:focus, .form-group select:focus { 
+    outline: none; 
+    border-color: #3483fa; 
+    box-shadow: 0 0 0 3px rgba(52, 131, 250, 0.1);
+}
+
+/* Alertas */
+.alert { 
+    padding: 15px; 
+    margin-bottom: 20px; 
+    border-radius: 6px; 
+    border: 1px solid transparent;
+}
+
+.alert-success { 
+    background: #d4edda; 
+    color: #155724; 
+    border-color: #c3e6cb; 
+}
+
+.alert-warning { 
+    background: #fff3cd; 
+    color: #856404; 
+    border-color: #ffeaa7; 
+}
+
+.alert-danger { 
+    background: #f8d7da; 
+    color: #721c24; 
+    border-color: #f5c6cb; 
+}
+
+.alert-info { 
+    background: #d1ecf1; 
+    color: #0c5460; 
+    border-color: #bee5eb; 
+}
+
+/* Responsividade */
+@media (max-width: 768px) {
+    .container { 
+        padding: 10px; 
+    }
+    
+    .header h1 { 
+        font-size: 2em; 
+    }
+    
+    .stats { 
+        grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); 
+        gap: 15px; 
+    }
+    
+    .stat-card { 
+        padding: 20px; 
+    }
+    
+    .stat-number { 
+        font-size: 2em; 
+    }
+    
+    .nav a { 
+        padding: 10px 16px; 
+        font-size: 14px; 
+    }
+    
+    .table { 
+        font-size: 12px; 
+    }
+    
+    .table th, .table td { 
+        padding: 8px; 
+    }
+}
+"""
+
+def create_base_template(title, content, current_page=""):
+    """Cria template base com layout minimalista"""
+    return f"""
+    <!DOCTYPE html>
+    <html lang="pt-BR">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>{title} - Bot ML</title>
+        <style>{BASE_CSS}</style>
+    </head>
+    <body>
+        <div class="container">
+            {content}
+        </div>
+    </body>
+    </html>
+    """
+
+def create_navigation(current_page=""):
+    """Cria navegação principal"""
+    nav_items = [
+        ("", "🏠 Dashboard"),
+        ("edit-rules", "✏️ Regras"),
+        ("edit-absence", "🌙 Ausência"),
+        ("history", "📊 Histórico"),
+        ("renovar-tokens", "🔄 Tokens"),
+        ("debug-full", "🔍 Debug")
+    ]
+    
+    nav_html = '<div class="nav">'
+    for page, label in nav_items:
+        active_class = ' active' if page == current_page else ''
+        href = f"/{page}" if page else "/"
+        nav_html += f'<a href="{href}" class="{active_class.strip()}">{label}</a>'
+    nav_html += '</div>'
+    
+    return nav_html
+
+def create_header(title, subtitle=""):
+    """Cria header principal"""
+    return f"""
+    <div class="header">
+        <h1>{title}</h1>
+        {f'<p>{subtitle}</p>' if subtitle else ''}
+    </div>
+    """
+
+def create_stat_card(number, label, color="#3483fa"):
+    """Cria card de estatística"""
+    return f"""
+    <div class="stat-card">
+        <div class="stat-number" style="color: {color}">{number}</div>
+        <div class="stat-label">{label}</div>
+    </div>
+    """
+
+# ========== DASHBOARD PRINCIPAL ==========
 @app.route('/')
 def dashboard():
     """Dashboard principal com estatísticas e status"""
