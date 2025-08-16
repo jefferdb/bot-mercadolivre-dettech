@@ -26,6 +26,7 @@ from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
 import requests
 import sqlite3
+from sqlalchemy.exc import IntegrityError
 
 # ========== CONFIGURAÇÃO DA APLICAÇÃO ==========
 app = Flask(__name__)
@@ -232,6 +233,7 @@ class AutoTokenRefresh:
 
         # Atualizar no banco de dados
         try:
+            with app.app_context():
             user = User.query.filter_by(ml_user_id=user_id).first()
             if user:
                 user.access_token = access_token
@@ -246,7 +248,7 @@ class AutoTokenRefresh:
         except Exception as e:
             add_debug_log(f"❌ Erro ao atualizar tokens no banco: {e}")
 
-    def get_token_status(self):
+    def def get_token_status(self):
         """Retorna status atual do token"""
         if not self.token_created_at or not self.token_expires_at:
             return {
@@ -304,7 +306,8 @@ class AutoTokenRefresh:
         add_debug_log("❌ Auto-renovação desabilitada")
 auto_refresh_manager = AutoTokenRefresh()
 
-    # ====== MULTI-CONTA: gerenciador de auto-refresh por usuário ======
+# ====== MULTI-CONTA: gerenciador de auto-refresh por usuário ======
+
 
 class AutoTokenRefreshManager:
     def __init__(self):
@@ -1499,7 +1502,7 @@ def webhook_ml():
                                 )
                                 db.session.add(history)
 
-                            db.session.commit()
+                            safe_commit()
                             add_debug_log("✅ Webhook processado por ID com sucesso")
                     except Exception as e:
                         add_debug_log(f"❌ Erro ao processar webhook/ID: {e}")
@@ -3088,3 +3091,31 @@ if __name__ == '__main__':
         threaded=True
     )
 
+
+
+# Helper para commit seguro (evita crash por UNIQUE em corridas)
+def safe_commit():
+    try:
+        db.session.commit()
+        return True
+    except IntegrityError:
+        db.session.rollback()
+        return False
+
+
+@app.before_first_request
+def _boot():
+    # Inicialização leve (não altera comportamento existente)
+    initialize_database()
+    create_default_data()
+    try:
+        initialize_auto_refresh()
+    except Exception as _e:
+        add_debug_log(f"⚠️ Falha ao iniciar auto-renovação: {_e}")
+    # inicia monitor
+    try:
+        t = threading.Thread(target=monitor_questions, daemon=True)
+        t.start()
+        add_debug_log("🚀 Monitor de perguntas iniciado")
+    except Exception as _e:
+        add_debug_log(f"⚠️ Falha ao iniciar monitor: {_e}")
