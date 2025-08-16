@@ -25,27 +25,6 @@ from flask import Flask, request, jsonify, redirect, url_for, render_template_st
 from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
 import requests
-
-
-def fetch_item_seller_id(access_token: str, item_id: str):
-    """Obtém o seller_id do item para validar propriedade antes de responder."""
-    if not item_id:
-        return None
-    url = f"https://api.mercadolibre.com/items/{item_id}"
-    headers = {"Authorization": f"Bearer {access_token}"} if access_token else {}
-    try:
-        r = requests.get(url, headers=headers, timeout=30)
-        if r.status_code == 200:
-            data = r.json()
-            sid = data.get("seller_id")
-            if sid is None and isinstance(data.get("seller"), dict):
-                sid = data["seller"].get("id")
-            return str(sid) if sid is not None else None
-        add_debug_log(f"⚠️ Falha ao buscar item {item_id}: {r.status_code}: {r.text}")
-    except Exception as e:
-        add_debug_log(f"❌ Erro ao buscar seller_id do item {item_id}: {e}")
-    return None
-
 import sqlite3
 
 # ========== CONFIGURAÇÃO DA APLICAÇÃO ==========
@@ -255,22 +234,22 @@ class AutoTokenRefresh:
         ML_REFRESH_TOKEN = refresh_token
         ML_USER_ID = user_id
         
-        # Atualizar no banco de dados
+        # Atualizar no banco de dados (precisa de app_context se chamado por thread/Timer)
         try:
-            user = User.query.filter_by(ml_user_id=user_id).first()
-            if user:
-                user.access_token = access_token
-                user.refresh_token = refresh_token
-                user.token_expires_at = datetime.utcnow() + timedelta(hours=6)
-                user.updated_at = get_local_time_utc()
-                db.session.commit()
-                add_debug_log("💾 Tokens atualizados no banco de dados")
-            else:
-                add_debug_log("⚠️ Usuário não encontrado no banco para atualizar tokens")
-                
+            with app.app_context():
+                user = User.query.filter_by(ml_user_id=user_id).first()
+                if user:
+                    user.access_token = access_token
+                    user.refresh_token = refresh_token
+                    user.token_expires_at = datetime.utcnow() + timedelta(hours=6)
+                    user.updated_at = get_local_time_utc()
+                    db.session.commit()
+                    add_debug_log("💾 Tokens atualizados no banco de dados")
+                else:
+                    add_debug_log("⚠️ Usuário não encontrado no banco para atualizar tokens")
         except Exception as e:
             add_debug_log(f"❌ Erro ao atualizar tokens no banco: {e}")
-    
+
     def get_token_status(self):
         """Retorna status atual do token"""
         if not self.token_created_at or not self.token_expires_at:
@@ -1273,166 +1252,126 @@ def api_process_code_flexible():
 
 @app.route('/api/ml/webhook', methods=['GET', 'POST'])
 def webhook_ml():
-    """Webhook para receber códigos de autorização e notificações do ML"""
-    try:
-        if request.method == 'GET':
-            # Verificar se há código de autorização na URL
-            code = request.args.get('code')
-            if code:
-                add_debug_log(f"🔗 Código recebido via webhook GET: {code}")
+    
+    if request.method == 'GET':
+        # Verificar se há código de autorização na URL
+        code = request.args.get('code')
+        if code:
+            add_debug_log(f"🔗 Código recebido via webhook GET: {code}")
+            
+            # Processar código automaticamente
+            success, result = process_auth_code_flexible(code)
+            
+            if success:
+                update_system_tokens(
+                    result['access_token'],
+                    result['refresh_token'],
+                    result['user_id']
+                )
                 
-                # Processar código automaticamente
-                success, result = process_auth_code_flexible(code)
-                
-                if success:
-                    update_system_tokens(
-                        result['access_token'],
-                        result['refresh_token'],
-                        result['user_id']
-                    )
-                    
-                    return f"""
-                    <!DOCTYPE html>
-                    <html>
-                    <head><title>Autorização Concluída</title></head>
-                    <body>
-                        <h1>✅ Tokens Atualizados com Sucesso!</h1>
-                        <p><strong>User ID:</strong> {result['user_id']}</p>
-                        <p><strong>Token:</strong> {code}</p>
-                        <p>O sistema já está usando os novos tokens.</p>
-                        <p><a href="/">← Voltar ao Dashboard</a></p>
-                    </body>
-                    </html>
-                    """
-                else:
-                    return f"""
-                    <!DOCTYPE html>
-                    <html>
-                    <head><title>Erro na Autorização</title></head>
-                    <body>
-                        <h1>❌ Erro na Autorização</h1>
-                        <p>{result.get('message', 'Erro desconhecido')}</p>
-                        <p><a href="/renovar-tokens">← Tentar Novamente</a></p>
-                    </body>
-                    </html>
-                    """
-            else:
-                return jsonify({"message": "webhook funcionando!", "status": "webhook_active"})
-        
-        
-elif request.method == "POST":
-    try:
-        payload = request.get_json(force=True, silent=True) or {}
-        add_debug_log(f"📨 Notificação recebida: {payload}")
-
-        topic = payload.get("topic")
-        resource = payload.get("resource", "") or ""
-        user_id_ml = str(payload.get("user_id") or payload.get("user") or "")
-
-        if topic != "questions" or not resource.startswith("/questions/"):
-            add_debug_log("ℹ️ Webhook ignorado (topic diferente de 'questions' ou resource inválido)")
-            return jsonify({"ok": True}), 200
-
-        # Extrai ID da pergunta
+                return f"""
+                <!DOCTYPE html>
+                <html>
+                <head><title>Autorização Concluída</title></head>
+                <body>
+                    <h1>✅ Tokens Atualizados com Sucesso!</h1>
+                    <p><strong>User ID:</strong> {result['user_id']}</p>
+                    <p><strong>Token:</strong> {code}</p>
+                    <p>O sistema já está usando os novos tokens.</p>
+                    <p><a href="/">← Voltar ao Dashboard</a></p>
+                </body>
+                </html>
+                """
+    elif request.method == 'POST':
         try:
-            qid = resource.strip("/").split("/")[1]
-        except Exception:
-            add_debug_log(f"⚠️ Resource inesperado: {resource}")
-            return jsonify({"ok": True}), 200
-
-        # Carrega token do usuário dono
-        with app.app_context():
-            user = User.query.filter_by(ml_user_id=user_id_ml).first()
-        if not user or not (user.access_token or user.refresh_token):
-            add_debug_log(f"⚠️ Sem token armazenado para user {user_id_ml}")
-            return jsonify({"ok": True}), 200
-
-        access_token = user.access_token
-
-        # 1) Busca a pergunta por ID com retry on-401 se disponível
-        q = None
-        try:
-            q = fetch_question_by_id_with_token(access_token, qid, user_id_for_refresh=user_id_ml)
-        except TypeError:
-            # se a função não aceita user_id_for_refresh na sua base, chama sem o param
-            q = fetch_question_by_id_with_token(access_token, qid)
-        if not q:
-            add_debug_log(f"⚠️ Pergunta {qid} não disponível ainda; tentar no próximo ciclo")
-            return jsonify({"ok": True}), 200
-
-        text = q.get("text") or ""
-        item_id = q.get("item_id") or ""
-
-        # 2) Valida o dono do anúncio para evitar 403 em multi-conta
-        seller_id = fetch_item_seller_id(access_token, item_id)
-        if seller_id and str(seller_id) != str(user_id_ml):
-            add_debug_log(f"⛔ Ignorado: user {user_id_ml} não é dono do item {item_id} (seller_id={seller_id})")
-            return jsonify({"ok": True}), 200
-
-        # 3) Idempotência ao registrar pergunta
-        with app.app_context():
-            existing = Question.query.filter_by(ml_question_id=str(qid)).first()
-            if existing and existing.is_answered:
-                add_debug_log("⏭️ Pergunta já respondida")
+            payload = request.get_json(force=True, silent=True) or {}
+            add_debug_log(f"📨 Notificação recebida: {payload}")
+            topic = payload.get("topic")
+            resource = payload.get("resource", "") or ""
+            user_id_ml = str(payload.get("user_id") or payload.get("user") or "")
+            if topic != "questions" or not resource.startswith("/questions/"):
+                add_debug_log("ℹ️ Webhook ignorado (topic diferente de 'questions' ou resource inválido)")
                 return jsonify({"ok": True}), 200
-
-            if existing:
-                question = existing
-            else:
+            try:
+                qid = resource.strip("/").split("/")[1]
+            except Exception:
+                add_debug_log(f"⚠️ Resource inesperado: {resource}")
+                return jsonify({"ok": True}), 200
+            with app.app_context():
+                user = User.query.filter_by(ml_user_id=user_id_ml).first()
+            if not user or not (user.access_token or user.refresh_token):
+                add_debug_log(f"⚠️ Sem token armazenado para user {user_id_ml}")
+                return jsonify({"ok": True}), 200
+            access_token = user.access_token
+            q = None
+            try:
+                q = fetch_question_by_id_with_token(access_token, qid, user_id_for_refresh=user_id_ml)
+            except TypeError:
+                q = fetch_question_by_id_with_token(access_token, qid)
+            if not q:
+                add_debug_log(f"⚠️ Pergunta {qid} não disponível ainda; tentar no próximo ciclo")
+                return jsonify({"ok": True}), 200
+            text = q.get("text") or ""
+            item_id = q.get("item_id") or ""
+            seller_id = fetch_item_seller_id(access_token, item_id)
+            if seller_id and str(seller_id) != str(user_id_ml):
+                add_debug_log(f"⛔ Ignorado: user {user_id_ml} não é dono do item {item_id} (seller_id={seller_id})")
+                return jsonify({"ok": True}), 200
+            with app.app_context():
+                existing = Question.query.filter_by(ml_question_id=str(qid)).first()
+                if existing and existing.is_answered:
+                    add_debug_log("⏭️ Pergunta já respondida")
+                    return jsonify({"ok": True}), 200
+                if existing:
+                    question = existing
+                else:
+                    try:
+                        question = Question(
+                            ml_question_id=str(qid),
+                            user_id=user.id,
+                            item_id=item_id or "",
+                            question_text=text,
+                            is_answered=False
+                        )
+                        db.session.add(question)
+                        db.session.flush()
+                    except Exception:
+                        db.session.rollback()
+                        question = Question.query.filter_by(ml_question_id=str(qid)).first()
+                        if not question:
+                            raise
+            try:
+                reply_text = build_reply_text(text, item_id=item_id)
+            except TypeError:
+                reply_text = build_reply_text(text)
+            if not reply_text:
+                add_debug_log("ℹ️ Sem resposta aplicável pelas regras (não enviar)")
+                return jsonify({"ok": True}), 200
+            sent = False
+            try:
+                sent = answer_question_ml_with_token(user.access_token, qid, reply_text, user_id_for_refresh=user_id_ml)
+            except TypeError:
+                sent = answer_question_ml_with_token(user.access_token, qid, reply_text)
+            if not sent:
+                add_debug_log("❌ Erro ao enviar resposta (ver logs do endpoint ML)")
+                return jsonify({"ok": False}), 200
+            with app.app_context():
+                question.response_text = reply_text
+                question.is_answered = True
+                question.answered_automatically = True
+                question.answered_at = datetime.utcnow()
                 try:
-                    question = Question(
-                        ml_question_id=str(qid),
-                        user_id=user.id,
-                        item_id=item_id or "",
-                        question_text=text,
-                        is_answered=False
-                    )
-                    db.session.add(question)
-                    db.session.flush()
+                    db.session.commit()
                 except Exception:
                     db.session.rollback()
-                    question = Question.query.filter_by(ml_question_id=str(qid)).first()
-                    if not question:
-                        raise
-
-        # 4) Monta resposta pelas suas regras/ausência
-        try:
-            reply_text = build_reply_text(text, item_id=item_id)
-        except TypeError:
-            # compat: se sua função não aceita item_id
-            reply_text = build_reply_text(text)
-        if not reply_text:
-            add_debug_log("ℹ️ Sem resposta aplicável pelas regras (não enviar)")
+            add_debug_log("✅ Webhook processado por ID com sucesso")
             return jsonify({"ok": True}), 200
+        except Exception as e:
+            add_debug_log(f"❌ Erro no webhook: {e}")
+            return jsonify({"ok": False, "error": str(e)}), 200
+    else:
+        return jsonify({"message": "webhook funcionando!", "status": "webhook_active"})
 
-        # 5) Envia resposta com o token correto (com fallback de refresh)
-        sent = False
-        try:
-            sent = answer_question_ml_with_token(user.access_token, qid, reply_text, user_id_for_refresh=user_id_ml)
-        except TypeError:
-            sent = answer_question_ml_with_token(user.access_token, qid, reply_text)
-
-        if not sent:
-            add_debug_log("❌ Erro ao enviar resposta (ver logs do endpoint ML)")
-            return jsonify({"ok": False}), 200
-
-        # 6) Marca como respondida
-        with app.app_context():
-            question.response_text = reply_text
-            question.is_answered = True
-            question.answered_automatically = True
-            question.answered_at = datetime.utcnow()
-            try:
-                db.session.commit()
-            except Exception:
-                db.session.rollback()
-
-        add_debug_log("✅ Webhook processado por ID com sucesso")
-        return jsonify({"ok": True}), 200
-
-    except Exception as e:
-        add_debug_log(f"❌ Erro no webhook: {e}")
-        return jsonify({"ok": False, "error": str(e)}), 200
 @app.route('/')
 def dashboard():
     """Dashboard principal com estatísticas e status"""
