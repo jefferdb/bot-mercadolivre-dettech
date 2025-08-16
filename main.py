@@ -25,6 +25,27 @@ from flask import Flask, request, jsonify, redirect, url_for, render_template_st
 from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
 import requests
+
+
+def fetch_item_seller_id(access_token: str, item_id: str):
+    """Obtém o seller_id do item para validar propriedade antes de responder."""
+    if not item_id:
+        return None
+    url = f"https://api.mercadolibre.com/items/{item_id}"
+    headers = {"Authorization": f"Bearer {access_token}"} if access_token else {}
+    try:
+        r = requests.get(url, headers=headers, timeout=30)
+        if r.status_code == 200:
+            data = r.json()
+            sid = data.get("seller_id")
+            if sid is None and isinstance(data.get("seller"), dict):
+                sid = data["seller"].get("id")
+            return str(sid) if sid is not None else None
+        add_debug_log(f"⚠️ Falha ao buscar item {item_id}: {r.status_code}: {r.text}")
+    except Exception as e:
+        add_debug_log(f"❌ Erro ao buscar seller_id do item {item_id}: {e}")
+    return None
+
 import sqlite3
 
 # ========== CONFIGURAÇÃO DA APLICAÇÃO ==========
@@ -1298,377 +1319,120 @@ def webhook_ml():
             else:
                 return jsonify({"message": "webhook funcionando!", "status": "webhook_active"})
         
-        elif request.method == 'POST':
-            # Processar notificação do ML
-            data = request.get_json()
-            
-            if data and data.get('topic') == 'questions':
-                add_debug_log(f"📨 Notificação de pergunta recebida: {data}")
-                
-                # Salvar log do webhook
-                webhook_log = WebhookLog(
-                    topic=data.get('topic'),
-                    resource=data.get('resource'),
-                    user_id_ml=data.get('user_id'),
-                    application_id=data.get('application_id'),
-                    sent=datetime.fromisoformat(data.get('sent', '').replace('Z', '+00:00')) if data.get('sent') else None
-                )
-                db.session.add(webhook_log)
-                db.session.commit()
-                
-                # Processar perguntas imediatamente
-                threading.Thread(target=process_questions, daemon=True).start()
-                
-                return jsonify({"status": "ok", "message": "notificação processada"})
-            
-            return jsonify({"status": "ok", "message": "webhook recebido"})
         
+elif request.method == "POST":
+    try:
+        payload = request.get_json(force=True, silent=True) or {}
+        add_debug_log(f"📨 Notificação recebida: {payload}")
+
+        topic = payload.get("topic")
+        resource = payload.get("resource", "") or ""
+        user_id_ml = str(payload.get("user_id") or payload.get("user") or "")
+
+        if topic != "questions" or not resource.startswith("/questions/"):
+            add_debug_log("ℹ️ Webhook ignorado (topic diferente de 'questions' ou resource inválido)")
+            return jsonify({"ok": True}), 200
+
+        # Extrai ID da pergunta
+        try:
+            qid = resource.strip("/").split("/")[1]
+        except Exception:
+            add_debug_log(f"⚠️ Resource inesperado: {resource}")
+            return jsonify({"ok": True}), 200
+
+        # Carrega token do usuário dono
+        with app.app_context():
+            user = User.query.filter_by(ml_user_id=user_id_ml).first()
+        if not user or not (user.access_token or user.refresh_token):
+            add_debug_log(f"⚠️ Sem token armazenado para user {user_id_ml}")
+            return jsonify({"ok": True}), 200
+
+        access_token = user.access_token
+
+        # 1) Busca a pergunta por ID com retry on-401 se disponível
+        q = None
+        try:
+            q = fetch_question_by_id_with_token(access_token, qid, user_id_for_refresh=user_id_ml)
+        except TypeError:
+            # se a função não aceita user_id_for_refresh na sua base, chama sem o param
+            q = fetch_question_by_id_with_token(access_token, qid)
+        if not q:
+            add_debug_log(f"⚠️ Pergunta {qid} não disponível ainda; tentar no próximo ciclo")
+            return jsonify({"ok": True}), 200
+
+        text = q.get("text") or ""
+        item_id = q.get("item_id") or ""
+
+        # 2) Valida o dono do anúncio para evitar 403 em multi-conta
+        seller_id = fetch_item_seller_id(access_token, item_id)
+        if seller_id and str(seller_id) != str(user_id_ml):
+            add_debug_log(f"⛔ Ignorado: user {user_id_ml} não é dono do item {item_id} (seller_id={seller_id})")
+            return jsonify({"ok": True}), 200
+
+        # 3) Idempotência ao registrar pergunta
+        with app.app_context():
+            existing = Question.query.filter_by(ml_question_id=str(qid)).first()
+            if existing and existing.is_answered:
+                add_debug_log("⏭️ Pergunta já respondida")
+                return jsonify({"ok": True}), 200
+
+            if existing:
+                question = existing
+            else:
+                try:
+                    question = Question(
+                        ml_question_id=str(qid),
+                        user_id=user.id,
+                        item_id=item_id or "",
+                        question_text=text,
+                        is_answered=False
+                    )
+                    db.session.add(question)
+                    db.session.flush()
+                except Exception:
+                    db.session.rollback()
+                    question = Question.query.filter_by(ml_question_id=str(qid)).first()
+                    if not question:
+                        raise
+
+        # 4) Monta resposta pelas suas regras/ausência
+        try:
+            reply_text = build_reply_text(text, item_id=item_id)
+        except TypeError:
+            # compat: se sua função não aceita item_id
+            reply_text = build_reply_text(text)
+        if not reply_text:
+            add_debug_log("ℹ️ Sem resposta aplicável pelas regras (não enviar)")
+            return jsonify({"ok": True}), 200
+
+        # 5) Envia resposta com o token correto (com fallback de refresh)
+        sent = False
+        try:
+            sent = answer_question_ml_with_token(user.access_token, qid, reply_text, user_id_for_refresh=user_id_ml)
+        except TypeError:
+            sent = answer_question_ml_with_token(user.access_token, qid, reply_text)
+
+        if not sent:
+            add_debug_log("❌ Erro ao enviar resposta (ver logs do endpoint ML)")
+            return jsonify({"ok": False}), 200
+
+        # 6) Marca como respondida
+        with app.app_context():
+            question.response_text = reply_text
+            question.is_answered = True
+            question.answered_automatically = True
+            question.answered_at = datetime.utcnow()
+            try:
+                db.session.commit()
+            except Exception:
+                db.session.rollback()
+
+        add_debug_log("✅ Webhook processado por ID com sucesso")
+        return jsonify({"ok": True}), 200
+
     except Exception as e:
         add_debug_log(f"❌ Erro no webhook: {e}")
-        return jsonify({'status': 'error', 'message': str(e)}), 500
-
-
-# ========== LAYOUT MINIMALISTA E SISTEMA DE HISTÓRICO ==========
-# Baseado nos módulos modulo_layout_minimalista.py e modulo_historico_respostas.py
-
-# CSS Base para todas as páginas
-BASE_CSS = """
-* { 
-    margin: 0; 
-    padding: 0; 
-    box-sizing: border-box; 
-}
-
-body { 
-    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
-    background: #f8f9fa; 
-    line-height: 1.6;
-}
-
-.container { 
-    max-width: 1200px; 
-    margin: 0 auto; 
-    padding: 20px; 
-}
-
-/* Header principal */
-.header { 
-    background: linear-gradient(135deg, #3483fa, #2968c8); 
-    color: white; 
-    padding: 30px; 
-    border-radius: 12px; 
-    margin-bottom: 30px; 
-    text-align: center;
-}
-
-.header h1 { 
-    font-size: 2.5em; 
-    margin-bottom: 10px; 
-    font-weight: 600;
-}
-
-.header p { 
-    font-size: 1.2em; 
-    opacity: 0.9; 
-}
-
-/* Navegação */
-.nav { 
-    margin-bottom: 30px; 
-}
-
-.nav a { 
-    display: inline-block; 
-    padding: 12px 24px; 
-    background: #3483fa; 
-    color: white; 
-    text-decoration: none; 
-    border-radius: 8px; 
-    margin-right: 10px; 
-    margin-bottom: 10px;
-    font-weight: 500;
-    transition: all 0.3s ease;
-}
-
-.nav a:hover { 
-    background: #2968c8; 
-    transform: translateY(-1px);
-}
-
-.nav a.active { 
-    background: #28a745; 
-}
-
-/* Grid de estatísticas */
-.stats { 
-    display: grid; 
-    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); 
-    gap: 20px; 
-    margin-bottom: 30px; 
-}
-
-.stat-card { 
-    background: white; 
-    padding: 25px; 
-    border-radius: 12px; 
-    box-shadow: 0 4px 15px rgba(0,0,0,0.08); 
-    text-align: center;
-    transition: transform 0.3s ease;
-}
-
-.stat-card:hover {
-    transform: translateY(-2px);
-}
-
-.stat-number { 
-    font-size: 2.5em; 
-    font-weight: bold; 
-    color: #3483fa; 
-    margin-bottom: 10px;
-}
-
-.stat-label { 
-    color: #666; 
-    font-size: 1.1em;
-}
-
-/* Cards gerais */
-.card { 
-    background: white; 
-    padding: 25px; 
-    border-radius: 12px; 
-    box-shadow: 0 4px 15px rgba(0,0,0,0.08); 
-    margin-bottom: 20px; 
-}
-
-.card h3 { 
-    color: #333; 
-    margin-bottom: 20px; 
-    font-size: 1.4em;
-}
-
-/* Botões */
-.btn { 
-    display: inline-block; 
-    padding: 10px 20px; 
-    background: #3483fa; 
-    color: white; 
-    text-decoration: none; 
-    border-radius: 6px; 
-    border: none; 
-    cursor: pointer; 
-    font-size: 14px;
-    font-weight: 500;
-    transition: all 0.3s ease;
-}
-
-.btn:hover { 
-    background: #2968c8; 
-    transform: translateY(-1px);
-}
-
-.btn-success { 
-    background: #28a745; 
-}
-
-.btn-success:hover { 
-    background: #218838; 
-}
-
-.btn-warning { 
-    background: #ffc107; 
-    color: #212529; 
-}
-
-.btn-warning:hover { 
-    background: #e0a800; 
-}
-
-.btn-danger { 
-    background: #dc3545; 
-}
-
-.btn-danger:hover { 
-    background: #c82333; 
-}
-
-/* Tabelas */
-.table { 
-    width: 100%; 
-    border-collapse: collapse; 
-    margin-top: 20px;
-}
-
-.table th, .table td { 
-    padding: 12px; 
-    text-align: left; 
-    border-bottom: 1px solid #ddd; 
-}
-
-.table th { 
-    background: #f8f9fa; 
-    font-weight: 600;
-    color: #333;
-}
-
-.table tr:hover { 
-    background: #f8f9fa; 
-}
-
-/* Formulários */
-.form-group { 
-    margin-bottom: 20px; 
-}
-
-.form-group label { 
-    display: block; 
-    margin-bottom: 8px; 
-    font-weight: 600;
-    color: #333;
-}
-
-.form-group input, .form-group textarea, .form-group select { 
-    width: 100%; 
-    padding: 12px; 
-    border: 1px solid #ddd; 
-    border-radius: 6px; 
-    font-size: 14px;
-}
-
-.form-group input:focus, .form-group textarea:focus, .form-group select:focus { 
-    outline: none; 
-    border-color: #3483fa; 
-    box-shadow: 0 0 0 3px rgba(52, 131, 250, 0.1);
-}
-
-/* Alertas */
-.alert { 
-    padding: 15px; 
-    margin-bottom: 20px; 
-    border-radius: 6px; 
-    border: 1px solid transparent;
-}
-
-.alert-success { 
-    background: #d4edda; 
-    color: #155724; 
-    border-color: #c3e6cb; 
-}
-
-.alert-warning { 
-    background: #fff3cd; 
-    color: #856404; 
-    border-color: #ffeaa7; 
-}
-
-.alert-danger { 
-    background: #f8d7da; 
-    color: #721c24; 
-    border-color: #f5c6cb; 
-}
-
-.alert-info { 
-    background: #d1ecf1; 
-    color: #0c5460; 
-    border-color: #bee5eb; 
-}
-
-/* Responsividade */
-@media (max-width: 768px) {
-    .container { 
-        padding: 10px; 
-    }
-    
-    .header h1 { 
-        font-size: 2em; 
-    }
-    
-    .stats { 
-        grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); 
-        gap: 15px; 
-    }
-    
-    .stat-card { 
-        padding: 20px; 
-    }
-    
-    .stat-number { 
-        font-size: 2em; 
-    }
-    
-    .nav a { 
-        padding: 10px 16px; 
-        font-size: 14px; 
-    }
-    
-    .table { 
-        font-size: 12px; 
-    }
-    
-    .table th, .table td { 
-        padding: 8px; 
-    }
-}
-"""
-
-def create_base_template(title, content, current_page=""):
-    """Cria template base com layout minimalista"""
-    return f"""
-    <!DOCTYPE html>
-    <html lang="pt-BR">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>{title} - Bot ML</title>
-        <style>{BASE_CSS}</style>
-    </head>
-    <body>
-        <div class="container">
-            {content}
-        </div>
-    </body>
-    </html>
-    """
-
-def create_navigation(current_page=""):
-    """Cria navegação principal"""
-    nav_items = [
-        ("", "🏠 Dashboard"),
-        ("edit-rules", "✏️ Regras"),
-        ("edit-absence", "🌙 Ausência"),
-        ("history", "📊 Histórico"),
-        ("renovar-tokens", "🔄 Tokens"),
-        ("debug-full", "🔍 Debug")
-    ]
-    
-    nav_html = '<div class="nav">'
-    for page, label in nav_items:
-        active_class = ' active' if page == current_page else ''
-        href = f"/{page}" if page else "/"
-        nav_html += f'<a href="{href}" class="{active_class.strip()}">{label}</a>'
-    nav_html += '</div>'
-    
-    return nav_html
-
-def create_header(title, subtitle=""):
-    """Cria header principal"""
-    return f"""
-    <div class="header">
-        <h1>{title}</h1>
-        {f'<p>{subtitle}</p>' if subtitle else ''}
-    </div>
-    """
-
-def create_stat_card(number, label, color="#3483fa"):
-    """Cria card de estatística"""
-    return f"""
-    <div class="stat-card">
-        <div class="stat-number" style="color: {color}">{number}</div>
-        <div class="stat-label">{label}</div>
-    </div>
-    """
-
-# ========== DASHBOARD PRINCIPAL ==========
+        return jsonify({"ok": False, "error": str(e)}), 200
 @app.route('/')
 def dashboard():
     """Dashboard principal com estatísticas e status"""
@@ -2902,3 +2666,4 @@ if __name__ == '__main__':
         debug=False,
         threaded=True
     )
+
